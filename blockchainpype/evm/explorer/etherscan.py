@@ -4,7 +4,7 @@ It supports generating transaction links and interacting with the Etherscan API
 for retrieving blockchain data and transaction information.
 """
 
-from pydantic import BaseModel
+from pydantic import BaseModel, SecretStr
 
 from blockchainpype.evm.blockchain.identifier import EthereumTransactionHash
 
@@ -23,8 +23,8 @@ class EtherscanConfiguration(BaseModel):
     """
 
     base_url: str = "https://etherscan.io"
-    api_key: str | None = None
     api_url: str = "https://api.etherscan.io/api"
+    api_key: SecretStr | None = None
 
 
 class EtherscanExplorer:
@@ -48,9 +48,15 @@ class EtherscanExplorer:
             configuration (EtherscanConfiguration): Explorer configuration including
                 URLs and optional API key
         """
-        self.api_key = configuration.api_key
-        self.base_url = configuration.base_url
-        self.api_url = configuration.api_url
+        self.configuration = configuration
+
+    @property
+    def base_url(self) -> str:
+        return self.configuration.base_url
+
+    @property
+    def api_url(self) -> str:
+        return self.configuration.api_url
 
     def get_transaction_link(self, transaction_hash: EthereumTransactionHash) -> str:
         """

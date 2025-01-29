@@ -150,6 +150,8 @@ class EthereumWallet(BlockchainWallet):
 
         return nonce
 
+    # === Transactions ===
+
     def sign_transaction(
         self, tx_data: dict, auto_assign_nonce: bool = True
     ) -> SignedTransaction:
@@ -345,9 +347,23 @@ class EthereumWallet(BlockchainWallet):
             gas_increase_percentage=gas_increase_percentage,
         )
 
+    async def get_transaction_update(
+        self,
+        transaction: EthereumTransaction,
+        timeout: timedelta,
+        raise_timeout: bool,
+        **kwargs: Any,
+    ) -> BlockchainTransactionUpdate: ...
+
     # === Balances ===
 
     async def update_balance(self, asset: EthereumAsset) -> None:
+        """
+        Update the balance for a specific asset.
+
+        Args:
+            asset (EthereumAsset): The asset to update the balance for
+        """
         balance = await self.fetch_balance(asset)
         self.balance_tracker.set_balance(
             asset, balance, reason="update_balance", balance_type=BalanceType.TOTAL
@@ -368,13 +384,3 @@ class EthereumWallet(BlockchainWallet):
             return await asset.contract.get_balance_of(self.address)
         else:
             raise ValueError(f"Unsupported asset type: {type(asset)}")
-
-    # === Transactions ===
-
-    async def get_transaction_update(
-        self,
-        transaction: EthereumTransaction,
-        timeout: timedelta,
-        raise_timeout: bool,
-        **kwargs: Any,
-    ) -> BlockchainTransactionUpdate: ...
