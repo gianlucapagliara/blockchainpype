@@ -13,13 +13,13 @@ from financepype.operations.transactions.models import (
     BlockchainTransactionState,
     BlockchainTransactionUpdate,
 )
-from financepype.operators.blockchains.blockchain import Blockchain, BlockchainProcessor
+from financepype.operators.blockchains.blockchain import Blockchain
 from financepype.operators.blockchains.identifier import BlockchainIdentifier
 from web3 import AsyncWeb3
 from web3.types import BlockData
 
 from blockchainpype.evm.asset import EthereumAssetData, EthereumNativeAsset
-from blockchainpype.evm.blockchain.configs import EthereumBlockchainConfiguration
+from blockchainpype.evm.blockchain.configuration import EthereumBlockchainConfiguration
 from blockchainpype.evm.blockchain.identifier import (
     EthereumAddress,
     EthereumTransactionHash,
@@ -217,7 +217,9 @@ class EthereumBlockchain(Blockchain):
                 transaction_id=transaction_hash,
                 new_state=BlockchainTransactionState.BROADCASTED,
                 receipt=None,
-                explorer_link=self.get_explorer_link(transaction_hash),
+                explorer_link=self.explorer.get_transaction_link(transaction_hash)
+                if self.explorer is not None
+                else None,
             )
         except Exception as e:
             transaction_update = BlockchainTransactionUpdate(
@@ -310,32 +312,8 @@ class EthereumBlockchain(Blockchain):
             raw_transaction=raw_transaction,
             receipt=transaction_receipt,
             fee=fee,
-            explorer_link=self.get_explorer_link(transaction_id),
+            explorer_link=self.explorer.get_transaction_link(transaction_id)
+            if self.explorer is not None
+            else None,
         )
         return transaction
-
-    def get_explorer_link(self, transaction_id: EthereumTransactionHash) -> str | None:
-        """
-        Get the block explorer URL for a transaction.
-
-        Args:
-            transaction_id (EthereumTransactionHash): Transaction hash
-
-        Returns:
-            str | None: Explorer URL if explorer is configured, None otherwise
-        """
-        if self.explorer is None:
-            return None
-
-        return self.explorer.get_transaction_link(transaction_id)
-
-
-class EthereumBlockchainProcessor(BlockchainProcessor):
-    """
-    Processor for handling Ethereum blockchain operations.
-
-    This class extends the base BlockchainProcessor to provide Ethereum-specific
-    processing capabilities. Implementation details are pending.
-    """
-
-    pass
