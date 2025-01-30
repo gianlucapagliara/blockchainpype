@@ -1,15 +1,14 @@
 [tool.poetry]
 name = "blockchainpype"
-version = "0.1.0"
+version = "0.1.1"
 description = "BlockchainPype is a Python library for interacting with multiple blockchain networks."
 authors = ["Gianluca Pagliara <pagliara.gianluca@gmail.com>"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
 python = "^3.13"
-financepype = {git = "https://github.com/gianlucapagliara/financepype.git", branch = "main"}
+financepype = "^0.1.0"
 web3 = "^7.6.1"
-base58 = "^2.1.1"
 solders = "^0.23.0"
 solana = "^0.36.3"
 
