@@ -163,8 +163,7 @@ class EthereumBlockchain(Blockchain):
         raw_balance = await self.web3.eth.get_balance(
             address.raw, block_identifier=block_number
         )
-        balance = self.web3.from_wei(raw_balance, "ether")
-        return Decimal(str(balance))
+        return self.native_asset.convert_to_decimals(raw_balance)
 
     # === Transactions ===
 

@@ -25,7 +25,7 @@ class SolanaConnectivityConfiguration(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    rpc: AsyncClient
+    rpc_provider: AsyncClient
 
 
 class SolanaNativeAssetConfiguration(BaseModel):
