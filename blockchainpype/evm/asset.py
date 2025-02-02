@@ -4,6 +4,8 @@ and ERC-20 tokens. It defines the data structures and relationships between diff
 types of Ethereum assets.
 """
 
+from abc import abstractmethod
+
 from financepype.assets.blockchain import BlockchainAsset, BlockchainAssetData
 from pydantic import Field
 
@@ -37,7 +39,14 @@ class EthereumAsset(BlockchainAsset):
         data (EthereumAssetData): Asset-specific data including name, symbol, and decimals
     """
 
-    data: EthereumAssetData
+    data: EthereumAssetData | None = None
+
+    @abstractmethod
+    async def initialize_data(self) -> None:
+        """
+        Initialize the asset data.
+        """
+        raise NotImplementedError
 
 
 class EthereumNativeAsset(EthereumAsset):
@@ -64,3 +73,6 @@ class EthereumNativeAsset(EthereumAsset):
             decimals=18,
         ),
     )
+
+    async def initialize_data(self) -> None:
+        return

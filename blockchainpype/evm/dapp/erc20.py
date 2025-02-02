@@ -8,7 +8,7 @@ from decimal import Decimal
 
 from pydantic import ConfigDict, Field
 
-from blockchainpype.evm.asset import EthereumAsset
+from blockchainpype.evm.asset import EthereumAsset, EthereumAssetData
 from blockchainpype.evm.blockchain.identifier import EthereumAddress
 from blockchainpype.evm.dapp.abi import EthereumABI, EthereumLocalFileABI
 from blockchainpype.evm.dapp.contract import (
@@ -44,6 +44,24 @@ class ERC20Contract(EthereumSmartContract):
     including querying balances and allowances, and performing transfers.
     All numeric values are handled as Decimal for precision.
     """
+
+    async def get_name(self) -> str:
+        """
+        Get the name of the token.
+        """
+        return await self.functions.name().call()
+
+    async def get_symbol(self) -> str:
+        """
+        Get the symbol of the token.
+        """
+        return await self.functions.symbol().call()
+
+    async def get_decimals(self) -> int:
+        """
+        Get the number of decimals of the token.
+        """
+        return await self.functions.decimals().call()
 
     async def get_total_supply(self) -> Decimal:
         """
@@ -149,3 +167,16 @@ class ERC20Token(EthereumAsset):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     contract: ERC20Contract | None = None
+
+    async def initialize_data(self) -> None:
+        if self.data is not None:
+            return
+
+        if self.contract is None:
+            raise ValueError("Contract is not initialized")
+
+        self.data = EthereumAssetData(
+            name=await self.contract.get_name(),
+            symbol=await self.contract.get_symbol(),
+            decimals=await self.contract.get_decimals(),
+        )

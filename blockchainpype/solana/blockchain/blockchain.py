@@ -53,8 +53,8 @@ class SolanaBlockchain(Blockchain):
         """
         super().__init__(configuration)
 
-        self.rpc_client = configuration.connectivity.rpc
-        self.commitment = configuration.connectivity.rpc.commitment
+        self.rpc_client = configuration.connectivity.rpc_provider
+        self.commitment = configuration.connectivity.rpc_provider.commitment
 
         self.native_asset = SolanaNativeAsset(
             platform=self.platform,
@@ -78,14 +78,6 @@ class SolanaBlockchain(Blockchain):
             SolanaBlockchainConfiguration: The current blockchain configuration
         """
         return cast(SolanaBlockchainConfiguration, super().configuration)
-
-    # === Conversions ===
-
-    def to_lamports(self, amount: Decimal) -> int:
-        return int(amount * 10**9)
-
-    def from_lamports(self, amount: int) -> Decimal:
-        return Decimal(amount) / Decimal(f"{10**9}")
 
     # === Blockchain ===
 
@@ -155,7 +147,7 @@ class SolanaBlockchain(Blockchain):
                 commitment=self.commitment,
             )
         ).value
-        return self.from_lamports(balance)
+        return self.native_asset.convert_to_decimals(balance)
 
     # === Transactions ===
 
