@@ -73,6 +73,8 @@ class SolanaWallet(BlockchainWallet):
             SolanaSigner(configuration.signer) if configuration.signer else None
         )
 
+        self.add_tracked_assets([self.blockchain.native_asset])
+
     @property
     def configuration(self) -> SolanaWalletConfiguration:
         """

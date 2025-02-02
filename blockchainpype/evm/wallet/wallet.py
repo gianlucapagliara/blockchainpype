@@ -67,7 +67,11 @@ class EthereumWallet(BlockchainWallet):
         signer (EthereumSigner | None): The signer instance for transaction signing
     """
 
-    def __init__(self, configuration: EthereumWalletConfiguration):
+    def __init__(
+        self,
+        configuration: EthereumWalletConfiguration,
+        blockchain: EthereumBlockchain | None = None,
+    ):
         """
         Initialize the Ethereum wallet with the provided configuration.
 
@@ -76,14 +80,19 @@ class EthereumWallet(BlockchainWallet):
         """
         super().__init__(configuration)
 
-        self._blockchain: EthereumBlockchain = cast(
-            EthereumBlockchain,
-            BlockchainFactory.create(configuration.identifier.platform.identifier),
-        )
+        if blockchain is None:
+            blockchain = cast(
+                EthereumBlockchain,
+                BlockchainFactory.create(configuration.identifier.platform.identifier),
+            )
+        self._blockchain = blockchain
+
         self.last_nonce: int | None = None
         self.signer: EthereumSigner | None = (
             EthereumSigner(configuration.signer) if configuration.signer else None
         )
+
+        self.add_tracked_assets([self.blockchain.native_asset])
 
     @property
     def configuration(self) -> EthereumWalletConfiguration:
