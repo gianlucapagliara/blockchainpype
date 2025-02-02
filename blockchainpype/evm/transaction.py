@@ -242,7 +242,10 @@ class EthereumTransaction(BlockchainTransaction):
         Returns:
             bool: True if the transaction can be modified, False otherwise
         """
-        return True
+        if self.is_pending and self.receipt is None:
+            return True
+
+        return False
 
     @property
     def can_be_cancelled(self) -> bool:
@@ -252,7 +255,10 @@ class EthereumTransaction(BlockchainTransaction):
         Returns:
             bool: True if the transaction can be cancelled, False otherwise
         """
-        return True
+        if self.is_pending and self.receipt is None:
+            return True
+
+        return False
 
     @property
     def can_be_speeded_up(self) -> bool:
@@ -262,7 +268,10 @@ class EthereumTransaction(BlockchainTransaction):
         Returns:
             bool: True if the transaction can be speeded up, False otherwise
         """
-        return True
+        if self.is_pending and self.receipt is None:
+            return True
+
+        return False
 
     def process_receipt(self, receipt: EthereumTransactionReceipt) -> bool:
         """
@@ -274,7 +283,6 @@ class EthereumTransaction(BlockchainTransaction):
         Returns:
             bool: True if the receipt was processed successfully
 
-        Raises:
-            NotImplementedError: This method needs to be implemented by subclasses
         """
-        raise NotImplementedError
+        self.receipt = receipt
+        return True
