@@ -1,9 +1,12 @@
 import pytest
-from financepype.platforms.blockchain import BlockchainPlatform, BlockchainType
+from financepype.platforms.blockchain import BlockchainPlatform
 from web3 import AsyncWeb3
 
 from blockchainpype.evm.asset import EthereumNativeAsset
-from blockchainpype.evm.blockchain.blockchain import EthereumBlockchain
+from blockchainpype.evm.blockchain.blockchain import (
+    EthereumBlockchain,
+    EthereumBlockchainType,
+)
 from blockchainpype.evm.blockchain.configuration import (
     EthereumBlockchainConfiguration,
     EthereumConnectivityConfiguration,
@@ -18,7 +21,7 @@ def ethereum_config() -> EthereumBlockchainConfiguration:
     return EthereumBlockchainConfiguration(
         platform=BlockchainPlatform(
             identifier="ethereum",
-            type=BlockchainType.EVM,
+            type=EthereumBlockchainType,
             chain_id=1,
         ),
         native_asset=EthereumNativeAssetConfiguration(),
@@ -43,7 +46,7 @@ async def test_blockchain_initialization(
 ) -> None:
     """Test blockchain instance initialization and basic properties."""
     assert ethereum_blockchain.platform.identifier == "ethereum"
-    assert ethereum_blockchain.platform.type == BlockchainType.EVM
+    assert ethereum_blockchain.platform.type == EthereumBlockchainType
     assert ethereum_blockchain.platform.chain_id == 1
 
     assert isinstance(ethereum_blockchain.native_asset, EthereumNativeAsset)

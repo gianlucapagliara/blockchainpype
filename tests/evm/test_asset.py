@@ -1,11 +1,12 @@
 import pytest
-from financepype.platforms.blockchain import BlockchainPlatform, BlockchainType
+from financepype.platforms.blockchain import BlockchainPlatform
 
 from blockchainpype.evm.asset import (
     EthereumAsset,
     EthereumAssetData,
     EthereumNativeAsset,
 )
+from blockchainpype.evm.blockchain.blockchain import EthereumBlockchainType
 from blockchainpype.evm.blockchain.identifier import (
     EthereumAddress,
     EthereumNullAddress,
@@ -43,7 +44,7 @@ def test_ethereum_asset() -> None:
     address = EthereumAddress.from_string("0x1234567890123456789012345678901234567890")
     platform = BlockchainPlatform(
         identifier="ethereum",
-        type=BlockchainType.EVM,
+        type=EthereumBlockchainType,
         chain_id=1,
     )
 
@@ -64,7 +65,7 @@ def test_ethereum_native_asset() -> None:
     """Test EthereumNativeAsset creation and properties."""
     platform = BlockchainPlatform(
         identifier="ethereum",
-        type=BlockchainType.EVM,
+        type=EthereumBlockchainType,
         chain_id=1,
     )
     native_asset = EthereumNativeAsset(platform=platform)

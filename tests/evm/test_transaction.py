@@ -3,10 +3,11 @@ from decimal import Decimal
 
 import pytest
 from eth_typing import BlockNumber, HexStr
-from financepype.platforms.blockchain import BlockchainPlatform, BlockchainType
+from financepype.platforms.blockchain import BlockchainPlatform
 from hexbytes import HexBytes
 from web3.types import Nonce, Wei
 
+from blockchainpype.evm.blockchain.blockchain import EthereumBlockchainType
 from blockchainpype.evm.blockchain.identifier import (
     EthereumAddress,
     EthereumBlockHash,
@@ -91,7 +92,7 @@ def test_ethereum_transaction(sample_tx_receipt_data: dict) -> None:
     """Test EthereumTransaction functionality."""
     platform = BlockchainPlatform(
         identifier="ethereum",
-        type=BlockchainType.EVM,
+        type=EthereumBlockchainType,
         chain_id=1,
     )
     owner = EthereumWalletIdentifier(
