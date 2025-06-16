@@ -15,6 +15,7 @@ from financepype.operations.transactions.models import (
 )
 from financepype.operators.blockchains.blockchain import Blockchain
 from financepype.operators.blockchains.identifier import BlockchainIdentifier
+from financepype.platforms.blockchain import BlockchainType
 from web3 import AsyncWeb3
 from web3.types import BlockData
 
@@ -31,6 +32,13 @@ from blockchainpype.evm.transaction import (
     EthereumTransactionReceipt,
 )
 from blockchainpype.evm.wallet.identifier import EthereumWalletIdentifier
+
+
+class _EthereumBlockchainType(BlockchainType):
+    EVM = "EVM"
+
+
+EthereumBlockchainType = _EthereumBlockchainType.EVM
 
 
 class EthereumBlockchain(Blockchain):

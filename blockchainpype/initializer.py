@@ -3,20 +3,31 @@ from financepype.platforms.blockchain import BlockchainPlatform, BlockchainType
 from solana.rpc.async_api import AsyncClient
 from web3 import AsyncHTTPProvider
 
-from blockchainpype.evm.blockchain.blockchain import EthereumBlockchain
+from blockchainpype.evm.blockchain.blockchain import (
+    EthereumBlockchain,
+    EthereumBlockchainType,
+)
 from blockchainpype.evm.blockchain.configuration import (
     EthereumBlockchainConfiguration,
     EthereumConnectivityConfiguration,
     EthereumNativeAssetConfiguration,
 )
 from blockchainpype.evm.explorer.etherscan import EtherscanConfiguration
-from blockchainpype.factory import BlockchainFactory, BlockchainRegistry
-from blockchainpype.solana.blockchain.blockchain import SolanaBlockchain
+from blockchainpype.factory import BlockchainFactory
+from blockchainpype.solana.blockchain.blockchain import (
+    SolanaBlockchain,
+    SolanaBlockchainType,
+)
 from blockchainpype.solana.blockchain.configuration import (
     SolanaBlockchainConfiguration,
     SolanaConnectivityConfiguration,
 )
 from blockchainpype.solana.explorer.solscan import SolscanConfiguration
+
+
+class SupportedBlockchainType(BlockchainType):
+    EVM = EthereumBlockchainType
+    SOLANA = SolanaBlockchainType
 
 
 class BlockchainConfigurations:
@@ -25,7 +36,7 @@ class BlockchainConfigurations:
         return EthereumBlockchainConfiguration(
             platform=BlockchainPlatform(
                 identifier="ethereum",
-                type=BlockchainType.EVM,
+                type=SupportedBlockchainType.EVM,
                 chain_id=1,
             ),
             native_asset=EthereumNativeAssetConfiguration(),
@@ -40,7 +51,7 @@ class BlockchainConfigurations:
         return EthereumBlockchainConfiguration(
             platform=BlockchainPlatform(
                 identifier="hardhat",
-                type=BlockchainType.EVM,
+                type=SupportedBlockchainType.EVM,
                 local=True,
                 testnet=True,
                 chain_id=None,
@@ -58,7 +69,7 @@ class BlockchainConfigurations:
         return SolanaBlockchainConfiguration(
             platform=BlockchainPlatform(
                 identifier="solana",
-                type=BlockchainType.SOLANA,
+                type=SupportedBlockchainType.SOLANA,
                 chain_id=None,
             ),
             connectivity=SolanaConnectivityConfiguration(
@@ -87,11 +98,11 @@ class BlockchainsInitializer:
     @classmethod
     def register_blockchain_classes(cls) -> None:
         """Register blockchain classes for different blockchain types."""
-        BlockchainFactory.register_blockchain_class(
-            BlockchainType.EVM, EthereumBlockchain
+        BlockchainFactory.register_blockchain_class_for_type(
+            EthereumBlockchain, SupportedBlockchainType.EVM
         )
-        BlockchainFactory.register_blockchain_class(
-            BlockchainType.SOLANA, SolanaBlockchain
+        BlockchainFactory.register_blockchain_class_for_type(
+            SolanaBlockchain, SupportedBlockchainType.SOLANA
         )
 
     @classmethod
@@ -106,7 +117,7 @@ class BlockchainsInitializer:
 
         for _, config in configurations.get_configurations().items():
             if config is not None and config.platform.type in blockchain_types:
-                BlockchainRegistry.register(config)
+                BlockchainFactory.register_configuration(config)
 
     @classmethod
     def configure(

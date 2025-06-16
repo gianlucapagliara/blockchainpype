@@ -12,6 +12,7 @@ from financepype.operations.transactions.models import (
     BlockchainTransactionUpdate,
 )
 from financepype.operators.blockchains.blockchain import Blockchain, BlockchainProcessor
+from financepype.platforms.blockchain import BlockchainType
 from solana.rpc.types import TxOpts
 from solders.hash import Hash
 from solders.transaction import Transaction, VersionedTransaction
@@ -25,6 +26,17 @@ from blockchainpype.solana.blockchain.identifier import (
 )
 from blockchainpype.solana.explorer.solscan import SolscanExplorer
 from blockchainpype.solana.transaction import SolanaTransaction
+
+
+class _SolanaBlockchainType(BlockchainType):
+    """
+    Type of Solana blockchain.
+    """
+
+    SOLANA = "SOLANA"
+
+
+SolanaBlockchainType = _SolanaBlockchainType.SOLANA
 
 
 class SolanaBlockchain(Blockchain):
