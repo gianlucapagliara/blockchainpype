@@ -1,0 +1,31 @@
+{
+  "name": "hardhat-testing-framework",
+  "version": "1.0.0",
+  "description": "Hardhat testing framework for blockchain development",
+  "main": "hardhat.config.js",
+  "scripts": {
+    "node": "hardhat node",
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "deploy": "hardhat run scripts/deploy.js --network localhost",
+    "deploy-testnet": "hardhat run scripts/deploy.js --network hardhat",
+    "clean": "hardhat clean",
+    "console": "hardhat console --network localhost"
+  },
+  "keywords": [
+    "hardhat",
+    "ethereum",
+    "testing",
+    "blockchain"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@nomicfoundation/hardhat-network-helpers": "^1.0.12",
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "@openzeppelin/contracts": "^5.2.0",
+    "hardhat": "^2.22.18",
+    "hardhat-gas-reporter": "^1.0.9",
+    "solidity-coverage": "^0.8.12"
+  }
+}
