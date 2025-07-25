@@ -67,7 +67,7 @@ class SolanaWallet(BlockchainWallet):
 
         self._blockchain: SolanaBlockchain = cast(
             SolanaBlockchain,
-            BlockchainFactory.create(configuration.identifier.platform.identifier),
+            BlockchainFactory.get(configuration.identifier.platform),
         )
         self.signer: SolanaSigner | None = (
             SolanaSigner(configuration.signer) if configuration.signer else None

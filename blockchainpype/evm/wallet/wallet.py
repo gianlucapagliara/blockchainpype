@@ -83,7 +83,7 @@ class EthereumWallet(BlockchainWallet):
         if blockchain is None:
             blockchain = cast(
                 EthereumBlockchain,
-                BlockchainFactory.create(configuration.identifier.platform.identifier),
+                BlockchainFactory.get(configuration.identifier.platform),
             )
         self._blockchain = blockchain
 

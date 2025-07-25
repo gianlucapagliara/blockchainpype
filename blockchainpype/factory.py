@@ -43,7 +43,7 @@ class BlockchainFactory(OperatorFactory):
     def register_configuration(cls, configuration: BlockchainConfiguration) -> None:
         """Register a new blockchain configuration."""
         if configuration.platform.type in cls._blockchain_classes and (
-            configuration.platform not in cls._operator_classes
+            configuration.platform not in cls._platform_class_mapping
         ):
             cls.register_operator_class(
                 configuration.platform,
