@@ -17,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from blockchainpype.evm.blockchain.identifier import EthereumAddress
-from tests.hardhat import HardhatTestEnvironment, get_hardhat_accounts
+from tests.evm.hardhat import HardhatTestEnvironment, get_hardhat_accounts
 
 
 async def main():

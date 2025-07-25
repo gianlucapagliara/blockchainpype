@@ -13,7 +13,7 @@ import pytest
 from web3 import Web3
 
 from blockchainpype.evm.blockchain.identifier import EthereumAddress
-from tests.hardhat import get_hardhat_accounts, get_hardhat_private_keys
+from tests.evm.hardhat import get_hardhat_accounts, get_hardhat_private_keys
 
 
 class TestHardhatBasicOperations:

@@ -390,7 +390,7 @@ class HardhatTestEnvironment:
 @pytest.fixture(scope="session")
 def hardhat_dir():
     """Path to the Hardhat directory."""
-    return os.path.join(os.path.dirname(__file__), "..", "common", "hardhat")
+    return os.path.join(os.path.dirname(__file__), "..", "..", "common", "hardhat")
 
 
 @pytest.fixture(scope="session")

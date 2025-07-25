@@ -5,4 +5,4 @@ This module provides all the fixtures needed for testing with Hardhat.
 """
 
 # Import all fixtures from hardhat to make them available to pytest
-from tests.hardhat import *
+from tests.evm.hardhat import *
