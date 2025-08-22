@@ -36,7 +36,7 @@ class BlockchainConfigurations:
         return EthereumBlockchainConfiguration(
             platform=BlockchainPlatform(
                 identifier="ethereum",
-                type=SupportedBlockchainType.EVM,
+                type=SupportedBlockchainType.EVM.value,
                 chain_id=1,
             ),
             native_asset=EthereumNativeAssetConfiguration(),
@@ -51,7 +51,7 @@ class BlockchainConfigurations:
         return EthereumBlockchainConfiguration(
             platform=BlockchainPlatform(
                 identifier="hardhat",
-                type=SupportedBlockchainType.EVM,
+                type=SupportedBlockchainType.EVM.value,
                 local=True,
                 testnet=True,
                 chain_id=None,
@@ -69,7 +69,7 @@ class BlockchainConfigurations:
         return SolanaBlockchainConfiguration(
             platform=BlockchainPlatform(
                 identifier="solana",
-                type=SupportedBlockchainType.SOLANA,
+                type=SupportedBlockchainType.SOLANA.value,
                 chain_id=None,
             ),
             connectivity=SolanaConnectivityConfiguration(
@@ -89,7 +89,7 @@ class BlockchainConfigurations:
     @classmethod
     def get_configurations(cls) -> dict[str, BlockchainConfiguration | None]:
         return {
-            method[:-2]: getattr(cls, method)()
+            method.replace("_configuration", ""): getattr(cls, method)()
             for method in cls.configurations_methods()
         }
 
@@ -99,10 +99,10 @@ class BlockchainsInitializer:
     def register_blockchain_classes(cls) -> None:
         """Register blockchain classes for different blockchain types."""
         BlockchainFactory.register_blockchain_class_for_type(
-            EthereumBlockchain, SupportedBlockchainType.EVM
+            EthereumBlockchain, SupportedBlockchainType.EVM.value
         )
         BlockchainFactory.register_blockchain_class_for_type(
-            SolanaBlockchain, SupportedBlockchainType.SOLANA
+            SolanaBlockchain, SupportedBlockchainType.SOLANA.value
         )
 
     @classmethod
