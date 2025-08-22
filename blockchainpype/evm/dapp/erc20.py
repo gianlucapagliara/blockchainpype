@@ -32,7 +32,7 @@ class ERC20ContractConfiguration(EthereumContractConfiguration):
 
     address: EthereumAddress
     abi_configuration: EthereumABI = Field(
-        default_factory=lambda: EthereumLocalFileABI(file_name="ERC20.json")
+        default_factory=lambda: EthereumLocalFileABI(file_name="ERC20Mock.json")
     )
 
 
@@ -164,16 +164,19 @@ class ERC20Token(EthereumAsset):
         contract (ERC20Contract | None): The token's contract interface
     """
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    model_config = ConfigDict(arbitrary_types_allowed=True, frozen=False)
 
-    contract: ERC20Contract | None = None
+    contract: ERC20Contract
 
-    async def initialize_data(self) -> None:
+    async def initialize_data(self, auto_initialize_contract: bool = True) -> None:
         if self.data is not None:
             return
 
-        if self.contract is None:
-            raise ValueError("Contract is not initialized")
+        if not self.contract.is_initialized:
+            if auto_initialize_contract:
+                await self.contract.initialize()
+            else:
+                raise ValueError("Contract is not initialized")
 
         self.data = EthereumAssetData(
             name=await self.contract.get_name(),

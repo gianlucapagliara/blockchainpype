@@ -39,6 +39,7 @@ class EthereumAsset(BlockchainAsset):
         data (EthereumAssetData): Asset-specific data including name, symbol, and decimals
     """
 
+    identifier: EthereumAddress
     data: EthereumAssetData | None = None
 
     @abstractmethod
@@ -47,6 +48,10 @@ class EthereumAsset(BlockchainAsset):
         Initialize the asset data.
         """
         raise NotImplementedError
+
+    @property
+    def address(self) -> EthereumAddress:
+        return self.identifier
 
 
 class EthereumNativeAsset(EthereumAsset):

@@ -22,12 +22,12 @@ class EthereumABI(BaseModel):
     """
 
     @abstractmethod
-    async def get_abi(self) -> dict:
+    async def get_abi(self) -> list | dict:
         """
         Retrieve the contract ABI.
 
         Returns:
-            dict: The contract ABI as a dictionary
+            list | dict: The contract ABI as a list of function/event definitions or dict
 
         Raises:
             NotImplementedError: This method must be implemented by subclasses
@@ -48,12 +48,12 @@ class EthereumDictABI(EthereumABI):
 
     abi: dict
 
-    async def get_abi(self) -> dict:
+    async def get_abi(self) -> list | dict:
         """
         Retrieve the contract ABI from the stored dictionary.
 
         Returns:
-            dict: The contract ABI
+            list | dict: The contract ABI
         """
         return self.abi
 
@@ -83,16 +83,33 @@ class EthereumLocalFileABI(EthereumABI):
         """
         return os.path.join(self.folder_path, self.file_name)
 
-    async def get_abi(self) -> dict:
+    async def get_abi(self) -> list | dict:
         """
         Load and retrieve the contract ABI from the local file.
 
         Returns:
-            dict: The contract ABI loaded from the JSON file
+            list | dict: The contract ABI as a list of function/event definitions or dict
 
         Raises:
             FileNotFoundError: If the ABI file doesn't exist
             json.JSONDecodeError: If the file contains invalid JSON
+            KeyError: If the file doesn't contain a valid ABI structure
         """
         with open(self.file_path) as file:
-            return json.load(file)
+            data = json.load(file)
+
+            # Handle Hardhat artifact format
+            if isinstance(data, dict) and "abi" in data:
+                return data["abi"]
+
+            # Handle direct ABI array format
+            if isinstance(data, list):
+                return data
+
+            # If it's a dict but not a Hardhat artifact, assume it's the ABI itself
+            if isinstance(data, dict):
+                return data
+
+            raise ValueError(
+                f"Invalid ABI format in file {self.file_path}. Expected list or object with 'abi' field."
+            )
