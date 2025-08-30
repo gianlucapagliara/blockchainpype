@@ -7,7 +7,7 @@ readme = "README.md"
 
 [tool.poetry.dependencies]
 python = "^3.13"
-financepype = "0.1.6"
+financepype = "0.1.10"
 web3 = "^7.6.1"
 solders = "^0.23.0"
 solana = "^0.36.3"
