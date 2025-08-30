@@ -27,7 +27,7 @@ class DexConfiguration(DecentralizedApplicationConfiguration):
     minimum_received_multiplier: Decimal = Decimal("0.95")  # 5% slippage protection
 
 
-class ProtocolStrategy(Protocol):
+class ProtocolImplementation(Protocol):
     """Protocol-specific implementation of routing logic."""
 
     async def quote_swap(
@@ -55,7 +55,7 @@ class DecentralizedExchange(DecentralizedApplication):
     def __init__(self, configuration: DexConfiguration):
         super().__init__(configuration)
         self._configuration = configuration
-        self._protocol_strategies: dict[str, ProtocolStrategy] = {}
+        self._protocol_strategies: dict[str, ProtocolImplementation] = {}
         self._initialize_protocols()
 
     def _initialize_protocols(self) -> None:
