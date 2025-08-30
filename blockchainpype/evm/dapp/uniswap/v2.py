@@ -2,8 +2,8 @@ from decimal import Decimal
 from typing import cast
 
 from financepype.assets.blockchain import BlockchainAsset
-from financepype.operations.transactions.transaction import BlockchainTransaction
 from financepype.platforms.blockchain import BlockchainPlatform
+from web3.types import TxParams
 
 from blockchainpype.dapps.router.dex import ProtocolImplementation
 from blockchainpype.dapps.router.models import SwapHop, SwapMode, SwapRoute
@@ -18,6 +18,8 @@ from blockchainpype.evm.dapp.contract import (
     EthereumContractConfiguration,
     EthereumSmartContract,
 )
+from blockchainpype.evm.transaction import EthereumTransaction
+from blockchainpype.evm.wallet.wallet import EthereumWallet
 
 
 class UniswapV2(ProtocolImplementation):
@@ -205,8 +207,9 @@ class UniswapV2(ProtocolImplementation):
     async def build_swap_transaction(
         self,
         route: SwapRoute,
+        wallet: EthereumWallet,
         recipient: str | None = None,
-    ) -> BlockchainTransaction:
+    ) -> TxParams:
         """Build a swap transaction for the given route."""
         if len(route.sequence) != 1:
             raise ValueError(
@@ -239,8 +242,7 @@ class UniswapV2(ProtocolImplementation):
 
         # Use wallet address as recipient if not specified
         if recipient is None:
-            # TODO: Get default address from wallet/account management
-            raise ValueError("Recipient address is required")
+            recipient = wallet.address.raw
 
         if route.mode == SwapMode.EXACT_INPUT:
             # swapExactTokensForTokens
@@ -277,18 +279,75 @@ class UniswapV2(ProtocolImplementation):
         else:
             raise ValueError(f"Unsupported function: {function_name}")
 
-        # Build the transaction
-        transaction_data = await contract_function.build_transaction(
-            {
-                "from": recipient,
-                "gas": 200000,
-                "gasPrice": await self.blockchain.web3.eth.gas_price,
-            }
+        # Build the transaction using wallet's build_transaction method
+        return await wallet.build_transaction(function=contract_function)
+
+    async def create_swap_transaction(
+        self,
+        route: SwapRoute,
+        wallet: EthereumWallet,
+        recipient: str | None = None,
+        client_operation_id: str | None = None,
+    ) -> EthereumTransaction:
+        """Create and sign a swap transaction for the given route.
+
+        Args:
+            route: The swap route to execute
+            wallet: The wallet to use for signing the transaction
+            recipient: Optional recipient address (defaults to wallet address)
+            client_operation_id: Optional client operation ID for tracking
+
+        Returns:
+            EthereumTransaction: The created and signed transaction ready for broadcast
+        """
+        if client_operation_id is None:
+            input_asset_id = cast(EthereumAsset, route.input_asset).address.raw[:8]
+            output_asset_id = cast(EthereumAsset, route.output_asset).address.raw[:8]
+            client_operation_id = f"uniswap_v2_swap_{input_asset_id}_{output_asset_id}"
+
+        # Build the transaction parameters
+        tx_params = await self.build_swap_transaction(route, wallet, recipient)
+
+        # Sign and create the transaction object
+        return wallet.sign_and_send_transaction(
+            client_operation_id=client_operation_id,
+            tx_data=dict(tx_params),
+            auto_assign_nonce=True,
         )
 
-        # For now, raise NotImplementedError since the transaction building needs to be properly implemented with the correct EthereumTransaction constructor
-        raise NotImplementedError(
-            "Transaction building needs to be properly implemented"
+    async def execute_swap(
+        self,
+        input_asset: BlockchainAsset,
+        output_asset: BlockchainAsset,
+        amount: Decimal,
+        wallet: EthereumWallet,
+        mode: SwapMode = SwapMode.EXACT_INPUT,
+        recipient: str | None = None,
+        client_operation_id: str | None = None,
+    ) -> EthereumTransaction:
+        """Execute a swap between two assets.
+
+        Args:
+            input_asset: The asset to swap from
+            output_asset: The asset to swap to
+            amount: The amount to swap
+            wallet: The wallet to use for the transaction
+            mode: The swap mode (EXACT_INPUT or EXACT_OUTPUT)
+            recipient: Optional recipient address (defaults to wallet address)
+            client_operation_id: Optional client operation ID for tracking
+
+        Returns:
+            EthereumTransaction: The executed swap transaction
+        """
+        # Get a quote for the swap
+        route = await self.quote_swap(input_asset, output_asset, amount, mode)
+
+        # Create and execute the transaction
+        return await self.create_swap_transaction(
+            route=route,
+            wallet=wallet,
+            recipient=recipient,
+            client_operation_id=client_operation_id,
         )
 
     async def _get_pair(self, asset_a: EthereumAsset, asset_b: EthereumAsset) -> str:
