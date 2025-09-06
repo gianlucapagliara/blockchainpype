@@ -1,0 +1,34 @@
+{
+    "version": "0.1.0",
+    "name": "solend",
+    "instructions": {
+        "deposit": {
+            "name": "deposit",
+            "accounts": []
+        },
+        "withdraw": {
+            "name": "withdraw",
+            "accounts": []
+        },
+        "borrow": {
+            "name": "borrow",
+            "accounts": []
+        },
+        "repay": {
+            "name": "repay",
+            "accounts": []
+        },
+        "enable_collateral": {
+            "name": "enable_collateral",
+            "accounts": []
+        },
+        "disable_collateral": {
+            "name": "disable_collateral",
+            "accounts": []
+        },
+        "liquidate": {
+            "name": "liquidate",
+            "accounts": []
+        }
+    }
+}
