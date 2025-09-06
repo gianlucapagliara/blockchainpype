@@ -1,18 +1,16 @@
 """
-This package provides interfaces for interacting with Ethereum smart contracts and dApps.
-It includes implementations for standard contracts like ERC-20 tokens and provides
-base classes for building custom contract interfaces.
+This package provides EVM-specific implementations for money market protocols.
+It includes contract interfaces and implementations for protocols like Aave.
 """
 
-from .money_market import (
+from .aave import (
     AaveV3,
     AaveV3Configuration,
     AaveV3DataProviderContract,
     AaveV3MoneyMarket,
     AaveV3PoolContract,
-    EVMMoneyMarket,
-    EVMMoneyMarketConfiguration,
 )
+from .money_market import EVMMoneyMarket, EVMMoneyMarketConfiguration
 
 __all__ = [
     "EVMMoneyMarket",
