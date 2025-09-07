@@ -12,10 +12,43 @@ from .money_market import (
     MoneyMarket,
     MoneyMarketAction,
     MoneyMarketConfiguration,
-    ProtocolConfiguration,
-    ProtocolImplementation,
-    UserAccountData,
 )
+from .money_market import ProtocolConfiguration as MoneyMarketProtocolConfiguration
+from .money_market import ProtocolImplementation as MoneyMarketProtocolImplementation
+from .money_market import UserAccountData
+
+# Betting Market imports
+try:
+    from .betting_market import (
+        BettingMarketAction,
+        BettingMarketConfiguration,
+        BettingMarketDApp,
+        BettingMarketModel,
+        BettingPosition,
+        MarketOutcome,
+        MarketStatus,
+        OutcomeToken,
+    )
+    from .betting_market import (
+        ProtocolConfiguration as BettingMarketProtocolConfiguration,
+    )
+    from .betting_market import (
+        ProtocolImplementation as BettingMarketProtocolImplementation,
+    )
+
+    _betting_market_available = True
+except ImportError:
+    BettingMarketDApp = None
+    BettingMarketModel = None
+    BettingMarketAction = None
+    BettingMarketConfiguration = None
+    BettingPosition = None
+    MarketOutcome = None
+    MarketStatus = None
+    OutcomeToken = None
+    BettingMarketProtocolConfiguration = None
+    BettingMarketProtocolImplementation = None
+    _betting_market_available = False
 
 # Router imports (optional, may not be available in all setups)
 try:
@@ -31,9 +64,9 @@ except ImportError:
 __all__ = [
     # Money Market
     "MoneyMarket",
-    "ProtocolImplementation",
+    "MoneyMarketProtocolImplementation",
     "MoneyMarketConfiguration",
-    "ProtocolConfiguration",
+    "MoneyMarketProtocolConfiguration",
     "MoneyMarketAction",
     "LendingPosition",
     "BorrowingPosition",
@@ -46,3 +79,20 @@ __all__ = [
 # Add router exports if available
 if _router_available:
     __all__.extend(["SwapMode", "SwapRoute"])
+
+# Add betting market exports if available
+if _betting_market_available:
+    __all__.extend(
+        [
+            "BettingMarketDApp",
+            "BettingMarketModel",
+            "BettingMarketProtocolImplementation",
+            "BettingMarketConfiguration",
+            "BettingMarketProtocolConfiguration",
+            "BettingMarketAction",
+            "BettingPosition",
+            "MarketOutcome",
+            "MarketStatus",
+            "OutcomeToken",
+        ]
+    )
