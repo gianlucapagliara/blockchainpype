@@ -14,6 +14,25 @@ from .money_market import (
     EVMMoneyMarketConfiguration,
 )
 
+# Betting Market imports
+try:
+    from .betting_market import (
+        EVMBettingMarket,
+        EVMBettingMarketConfiguration,
+        Polymarket,
+        PolymarketBettingMarket,
+        PolymarketConfiguration,
+    )
+
+    _betting_market_available = True
+except ImportError:
+    EVMBettingMarket = None
+    EVMBettingMarketConfiguration = None
+    Polymarket = None
+    PolymarketConfiguration = None
+    PolymarketBettingMarket = None
+    _betting_market_available = False
+
 __all__ = [
     "EVMMoneyMarket",
     "EVMMoneyMarketConfiguration",
@@ -23,3 +42,15 @@ __all__ = [
     "AaveV3MoneyMarket",
     "AaveV3PoolContract",
 ]
+
+# Add betting market exports if available
+if _betting_market_available:
+    __all__.extend(
+        [
+            "EVMBettingMarket",
+            "EVMBettingMarketConfiguration",
+            "Polymarket",
+            "PolymarketConfiguration",
+            "PolymarketBettingMarket",
+        ]
+    )
