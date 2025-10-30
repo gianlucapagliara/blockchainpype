@@ -1,4 +1,5 @@
-from financepype.operators.blockchains.blockchain import Blockchain
+from typing import cast
+
 from financepype.operators.blockchains.models import BlockchainConfiguration
 from financepype.operators.factory import OperatorFactory
 from financepype.owners.wallet import (
@@ -7,6 +8,10 @@ from financepype.owners.wallet import (
     BlockchainWalletIdentifier,
 )
 from financepype.platforms.blockchain import BlockchainType
+
+from blockchainpype.blockchain import Blockchain
+from blockchainpype.evm.blockchain.blockchain import EthereumBlockchain
+from blockchainpype.solana.blockchain.blockchain import SolanaBlockchain
 
 
 class BlockchainFactory(OperatorFactory):
@@ -51,6 +56,16 @@ class BlockchainFactory(OperatorFactory):
             )
 
         super().register_configuration(configuration)
+
+    @classmethod
+    def get_evm_blockchain_by_identifier(cls, identifier: str) -> EthereumBlockchain:
+        """Get an EVM blockchain instance by its identifier."""
+        return cast(EthereumBlockchain, cls.get_by_identifier(identifier))
+
+    @classmethod
+    def get_solana_blockchain_by_identifier(cls, identifier: str) -> SolanaBlockchain:
+        """Get a Solana blockchain instance by its identifier."""
+        return cast(SolanaBlockchain, cls.get_by_identifier(identifier))
 
 
 class WalletRegistry:

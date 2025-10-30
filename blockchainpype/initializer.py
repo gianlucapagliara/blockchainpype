@@ -1,5 +1,8 @@
+import os
+
 from financepype.operators.blockchains.models import BlockchainConfiguration
 from financepype.platforms.blockchain import BlockchainPlatform, BlockchainType
+from pydantic import SecretStr
 from solana.rpc.async_api import AsyncClient
 from web3 import AsyncHTTPProvider
 
@@ -33,6 +36,8 @@ class SupportedBlockchainType(BlockchainType):
 class BlockchainConfigurations:
     @classmethod
     def ethereum_configuration(cls) -> EthereumBlockchainConfiguration | None:
+        api_key = os.getenv("ETHERSCAN_API_KEY")
+
         return EthereumBlockchainConfiguration(
             platform=BlockchainPlatform(
                 identifier="ethereum",
@@ -43,7 +48,12 @@ class BlockchainConfigurations:
             connectivity=EthereumConnectivityConfiguration(
                 rpc_provider=AsyncHTTPProvider("https://eth.llamarpc.com")
             ),
-            explorer=EtherscanConfiguration(base_url="https://etherscan.io"),
+            explorer=EtherscanConfiguration(
+                base_url="https://etherscan.io",
+                api_url="https://api.etherscan.io/v2/api",
+                chain_id=1,
+                api_key=SecretStr(api_key) if api_key else None,
+            ),
         )
 
     @classmethod

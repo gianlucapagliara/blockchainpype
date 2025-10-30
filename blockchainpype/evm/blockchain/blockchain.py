@@ -13,12 +13,12 @@ from financepype.operations.transactions.models import (
     BlockchainTransactionState,
     BlockchainTransactionUpdate,
 )
-from financepype.operators.blockchains.blockchain import Blockchain
 from financepype.operators.blockchains.identifier import BlockchainIdentifier
 from financepype.platforms.blockchain import BlockchainType
 from web3 import AsyncWeb3
 from web3.types import BlockData
 
+from blockchainpype.blockchain import Blockchain
 from blockchainpype.evm.asset import EthereumAssetData, EthereumNativeAsset
 from blockchainpype.evm.blockchain.configuration import EthereumBlockchainConfiguration
 from blockchainpype.evm.blockchain.identifier import (
@@ -76,9 +76,9 @@ class EthereumBlockchain(Blockchain):
             external_modules=configuration.connectivity.external_modules,
         )
 
-        self.explorer = None
+        self._explorer = None
         if configuration.explorer is not None:
-            self.explorer = EtherscanExplorer(configuration=configuration.explorer)
+            self._explorer = EtherscanExplorer(configuration=configuration.explorer)
 
         self.native_asset = EthereumNativeAsset(
             platform=self.platform,
@@ -98,6 +98,10 @@ class EthereumBlockchain(Blockchain):
             EthereumBlockchainConfiguration: The current blockchain configuration
         """
         return cast(EthereumBlockchainConfiguration, super().configuration)
+
+    @property
+    def explorer(self) -> EtherscanExplorer | None:
+        return self._explorer
 
     # === Blockchain ===
 

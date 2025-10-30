@@ -1,16 +1,17 @@
-"""
-This module provides classes for handling Ethereum smart contract ABIs (Application Binary Interfaces).
-It supports loading ABIs from different sources, including direct dictionaries and local files,
-with an extensible base class for implementing additional ABI sources.
-"""
+"""Ethereum ABI sourcing utilities."""
+
+from __future__ import annotations
 
 import json
 import os
 from abc import abstractmethod
 
-from pydantic import BaseModel, Field
+import aiohttp
+from pydantic import BaseModel, ConfigDict, Field
 
 from blockchainpype import common_abi_path
+from blockchainpype.evm.blockchain.identifier import EthereumAddress
+from blockchainpype.evm.explorer.etherscan import EtherscanExplorer
 
 
 class EthereumABI(BaseModel):
@@ -113,3 +114,36 @@ class EthereumLocalFileABI(EthereumABI):
             raise ValueError(
                 f"Invalid ABI format in file {self.file_path}. Expected list or object with 'abi' field."
             )
+
+
+class EthereumEtherscanABI(EthereumABI):
+    """Fetch contract ABIs from the Etherscan API.
+
+    This implementation delegates ABI retrieval to :class:`EtherscanExplorer` so
+    contracts can bootstrap themselves without a bundled artifact. Future
+    iterations may compose this remote source with local fallbacks.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    explorer: EtherscanExplorer
+    contract_address: EthereumAddress
+    request_timeout_seconds: float | None = 10.0
+
+    async def get_abi(self) -> list | dict:
+        """Retrieve and decode the remote ABI."""
+
+        timeout = (
+            aiohttp.ClientTimeout(total=self.request_timeout_seconds)
+            if self.request_timeout_seconds is not None
+            else None
+        )
+
+        try:
+            return await self.explorer.fetch_contract_abi(
+                self.contract_address, timeout=timeout
+            )
+        except ValueError as exc:  # pragma: no cover - wrapped for clarity
+            raise ValueError(
+                f"Unable to fetch ABI for {self.contract_address.string} from Etherscan: {exc}"
+            ) from exc
