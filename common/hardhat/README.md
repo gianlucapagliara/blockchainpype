@@ -2,6 +2,8 @@
 
 This directory contains the Hardhat testing environment for blockchain development.
 
+> 🚀 **New User?** Start with the [Quick Setup Guide](SETUP.md) for step-by-step instructions!
+
 ## Overview
 
 This setup provides:
@@ -15,6 +17,7 @@ This setup provides:
 ### 1. Install Dependencies
 
 ```bash
+cd common/hardhat
 npm install
 ```
 
@@ -26,8 +29,24 @@ npx hardhat compile
 
 ### 3. Run Hardhat Node
 
+**Local Network (No Forking):**
 ```bash
 npx hardhat node
+```
+
+**Forked Network (Mainnet Fork):**
+```bash
+# Set your API key first
+export INFURA_API_KEY="your_infura_project_id"
+
+# Fork Ethereum (default)
+./scripts/fork.sh
+
+# Or fork other chains
+./scripts/fork.sh arbitrum
+./scripts/fork.sh polygon
+./scripts/fork.sh base
+./scripts/fork.sh optimism
 ```
 
 ### 4. Deploy Contracts (in another terminal)
@@ -35,6 +54,18 @@ npx hardhat node
 ```bash
 npx hardhat run scripts/deploy-all.js --network localhost
 ```
+
+## Chain Fork Quick Reference
+
+| Command | Chain | Chain ID | Description |
+|---------|-------|----------|-------------|
+| `./scripts/fork.sh` or `./scripts/fork.sh ethereum` | Ethereum | 1 | Ethereum Mainnet |
+| `./scripts/fork.sh arbitrum` | Arbitrum | 42161 | Arbitrum One |
+| `./scripts/fork.sh polygon` | Polygon | 137 | Polygon PoS |
+| `./scripts/fork.sh base` | Base | 8453 | Base (Coinbase L2) |
+| `./scripts/fork.sh optimism` | Optimism | 10 | Optimism Mainnet |
+| `./scripts/fork.sh bsc` | BSC | 56 | BNB Smart Chain |
+| `./scripts/fork.sh avalanche` | Avalanche | 43114 | Avalanche C-Chain |
 
 ## Available Scripts
 
@@ -74,6 +105,374 @@ npx hardhat run scripts/deploy-all.js --network localhost
 - **URL**: http://127.0.0.1:8545
 - **Accounts**: Same as Hardhat Network
 - **Usage**: For external connections
+
+### Mainnet Fork Network
+- **Chain ID**: 1 (Ethereum Mainnet)
+- **Accounts**: 20 accounts with 10,000 ETH each
+- **Mining**: Configurable (auto or interval)
+- **Usage**: Testing with real mainnet contracts and state
+
+## Multi-Chain Forking
+
+Hardhat forking allows you to test your code against real blockchain contracts and state locally. This configuration supports forking from multiple chains.
+
+### Setting Up Environment Variables
+
+**Option 1: Using a `.env` file (Recommended)**
+
+1. Copy the template file:
+```bash
+cd common/hardhat
+cp env.template .env
+```
+
+2. Edit `.env` and add your API keys:
+```bash
+# .env file
+INFURA_API_KEY=your_actual_infura_key_here
+FORK_CHAIN=ethereum
+```
+
+3. The `.env` file is automatically loaded by Hardhat (it's in `.gitignore` so it won't be committed)
+
+**Option 2: Export environment variables manually**
+
+```bash
+export INFURA_API_KEY="your_key"
+export FORK_CHAIN="arbitrum"
+```
+
+**Option 3: Inline with command**
+
+```bash
+INFURA_API_KEY="your_key" FORK_CHAIN="polygon" npx hardhat node
+```
+
+**Supported Chains:**
+- 🔷 **Ethereum** (Chain ID: 1)
+- 🔵 **Arbitrum** (Chain ID: 42161)
+- 🟣 **Polygon** (Chain ID: 137)
+- 🔵 **Base** (Chain ID: 8453)
+- 🔴 **Optimism** (Chain ID: 10)
+- 🟡 **BNB Smart Chain / BSC** (Chain ID: 56)
+- 🔺 **Avalanche C-Chain** (Chain ID: 43114)
+
+**Use Cases:**
+- Testing interactions with existing DeFi protocols (Uniswap, Aave, etc.)
+- Debugging against real contract deployments
+- Simulating transactions before executing on mainnet
+- Reproducing production bugs in a local environment
+- Cross-chain testing and development
+
+### Environment Variables Reference
+
+These variables can be set in your `.env` file, exported in your shell, or passed inline with commands:
+
+| Variable | Description | Default | Priority |
+|----------|-------------|---------|----------|
+| `FORK_CHAIN` | Chain to fork (ethereum, arbitrum, polygon, base, optimism, bsc, avalanche) | `ethereum` | - |
+| `INFURA_API_KEY` | Infura project ID for RPC access | - | 1 (Highest) |
+| `ALCHEMY_API_KEY` | Alchemy API key for RPC access | - | 2 |
+| `[CHAIN]_FORK_URL` | Chain-specific custom RPC URL (e.g., `ARBITRUM_FORK_URL`) | - | 3 |
+| `FORK_URL` | Generic custom RPC endpoint URL | - | 4 (Lowest) |
+| `FORK_ENABLED` | Enable/disable forking | `true` | - |
+| `FORK_BLOCK_NUMBER` | Pin fork to specific block number | Latest | - |
+| `FORK_AUTO_MINING` | Enable auto-mining (false = interval mining) | `true` | - |
+
+**RPC Provider Priority**: The configuration tries Infura first, then Alchemy, then chain-specific custom URL, then generic custom URL.
+
+**Chain-Specific URLs**: You can set custom RPC URLs for each chain:
+- `ETHEREUM_FORK_URL`
+- `ARBITRUM_FORK_URL`
+- `POLYGON_FORK_URL`
+- `BASE_FORK_URL`
+- `OPTIMISM_FORK_URL`
+- `BSC_FORK_URL`
+- `AVALANCHE_FORK_URL`
+
+### Usage Examples
+
+#### Fork Ethereum Mainnet (Default)
+
+```bash
+# Using the helper script (easiest)
+./common/hardhat/scripts/fork.sh
+
+# Or manually with Infura
+cd common/hardhat
+export INFURA_API_KEY="your_infura_project_id"
+export FORK_CHAIN="ethereum"
+npx hardhat node
+```
+
+#### Fork Arbitrum
+
+```bash
+# Using the helper script
+./common/hardhat/scripts/fork.sh arbitrum
+
+# Or manually
+cd common/hardhat
+export INFURA_API_KEY="your_infura_project_id"
+export FORK_CHAIN="arbitrum"
+npx hardhat node
+```
+
+#### Fork Polygon
+
+```bash
+# Using the helper script
+./common/hardhat/scripts/fork.sh polygon
+
+# Or manually with Alchemy
+cd common/hardhat
+export ALCHEMY_API_KEY="your_alchemy_api_key"
+export FORK_CHAIN="polygon"
+npx hardhat node
+```
+
+#### Fork Base
+
+```bash
+./common/hardhat/scripts/fork.sh base
+```
+
+#### Fork Optimism
+
+```bash
+./common/hardhat/scripts/fork.sh optimism
+```
+
+#### Fork BSC (Requires Custom RPC)
+
+```bash
+# BSC requires custom RPC (not supported by Infura/Alchemy on all plans)
+export BSC_FORK_URL="https://bsc-dataseed.binance.org"
+export FORK_CHAIN="bsc"
+npx hardhat node
+```
+
+#### Fork with Custom RPC
+
+```bash
+# Chain-specific custom URL
+export ARBITRUM_FORK_URL="https://your-arbitrum-rpc-endpoint.com"
+export FORK_CHAIN="arbitrum"
+npx hardhat node
+
+# Generic custom URL
+export FORK_URL="https://your-custom-rpc-endpoint.com"
+export FORK_CHAIN="polygon"
+npx hardhat node
+```
+
+#### Pin to Specific Block Number
+
+```bash
+# Fork from a specific block (useful for reproducible tests)
+export INFURA_API_KEY="your_infura_project_id"
+export FORK_BLOCK_NUMBER="18000000"
+
+npx hardhat node --network mainnet-fork
+```
+
+#### Use Interval Mining (Simulate Real Block Times)
+
+```bash
+# Disable auto-mining to simulate real Ethereum block times (12-14s)
+export INFURA_API_KEY="your_infura_project_id"
+export FORK_AUTO_MINING="false"
+
+npx hardhat node --network mainnet-fork
+```
+
+#### Run Tests Against Forked Network
+
+```bash
+# Terminal 1: Start forked node
+export INFURA_API_KEY="your_infura_project_id"
+npx hardhat node --network mainnet-fork
+
+# Terminal 2: Run tests
+npx hardhat test --network localhost
+```
+
+#### Deploy Contracts to Fork
+
+```bash
+# Terminal 1: Start forked node
+export INFURA_API_KEY="your_infura_project_id"
+npx hardhat node --network mainnet-fork
+
+# Terminal 2: Deploy contracts
+npx hardhat run scripts/deploy-all.js --network localhost
+```
+
+### Python Integration with Forked Network
+
+```python
+from blockchainpype.initializer import BlockchainsInitializer
+from blockchainpype.factory import BlockchainFactory
+
+# Initialize blockchain configuration
+BlockchainsInitializer.configure()
+
+# Connect to forked network (running on localhost)
+blockchain = BlockchainFactory.get_by_identifier("hardhat")
+
+# Now you can interact with real mainnet contracts
+# Example: Get USDC balance
+usdc_address = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+wallet_address = "0xYourAddress"
+# ... your code here
+```
+
+### Best Practices
+
+1. **Use Block Pinning for Tests**: Pin to a specific block number for reproducible tests:
+   ```bash
+   export FORK_BLOCK_NUMBER="18000000"
+   ```
+
+2. **Cache Fork Data**: Hardhat caches forked data. To reset:
+   ```bash
+   npx hardhat clean
+   rm -rf cache/
+   ```
+
+3. **Monitor RPC Requests**: Free tier RPC providers have rate limits. Consider:
+   - Using block pinning to reduce requests
+   - Upgrading to paid RPC plans for heavy usage
+   - Using local archive nodes for unlimited access
+
+4. **Impersonate Accounts**: You can impersonate any mainnet account to test interactions:
+   ```javascript
+   // In your tests
+   await hre.network.provider.request({
+     method: "hardhat_impersonateAccount",
+     params: ["0xSomeMainnetAddress"],
+   });
+   ```
+
+5. **Reset Fork State**: Reset to initial fork state during testing:
+   ```bash
+   curl -X POST -H "Content-Type: application/json" \
+     --data '{"jsonrpc":"2.0","method":"hardhat_reset","params":[{"forking":{"jsonRpcUrl":"YOUR_RPC_URL"}}],"id":1}' \
+     http://127.0.0.1:8545
+   ```
+
+### Troubleshooting Forking
+
+#### Fork Not Starting
+
+```bash
+# Check if RPC URL is accessible
+curl -X POST -H "Content-Type: application/json" \
+  --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' \
+  https://mainnet.infura.io/v3/YOUR_API_KEY
+
+# Verify environment variables are set
+echo $INFURA_API_KEY
+```
+
+#### Slow Forking Performance
+
+- Pin to a specific block number to reduce initial sync time
+- Use a faster RPC provider (Alchemy often faster than Infura)
+- Consider using a local archive node for best performance
+
+#### Rate Limiting Issues
+
+```bash
+# Use block pinning to reduce RPC calls
+export FORK_BLOCK_NUMBER="18000000"
+
+# Or upgrade RPC provider plan
+# Or use multiple API keys with load balancing
+```
+
+#### Memory Issues with Large Forks
+
+```bash
+# Increase Node.js memory limit
+export NODE_OPTIONS="--max-old-space-size=4096"
+npx hardhat node --network mainnet-fork
+```
+
+### Common Use Cases
+
+#### Testing Ethereum DeFi Protocols
+
+```bash
+# Fork Ethereum mainnet
+export INFURA_API_KEY="your_key"
+export FORK_CHAIN="ethereum"
+npx hardhat node
+
+# Interact with real protocols:
+# - Uniswap V2/V3
+# - Aave
+# - Compound
+# - MakerDAO
+# Popular addresses:
+# - UniswapV2Router02: 0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D
+# - UniswapV3Router: 0xE592427A0AEce92De3Edee1F18E0157C05861564
+# - USDC: 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48
+# - DAI: 0x6B175474E89094C44Da98b954EedeAC495271d0F
+```
+
+#### Testing Arbitrum DeFi
+
+```bash
+# Fork Arbitrum
+./common/hardhat/scripts/fork.sh arbitrum
+
+# Test with Arbitrum-specific protocols:
+# - GMX: 0xfc5A1A6EB076a2C7aD06eD22C90d7E710E35ad0a
+# - Camelot DEX
+# - Radiant Capital
+```
+
+#### Testing Polygon DeFi
+
+```bash
+# Fork Polygon
+export FORK_CHAIN="polygon"
+export INFURA_API_KEY="your_key"
+npx hardhat node
+
+# Test with Polygon protocols:
+# - QuickSwap
+# - Aave Polygon
+# - Balancer
+```
+
+#### Testing Base Protocols
+
+```bash
+# Fork Base
+./common/hardhat/scripts/fork.sh base
+
+# Test with Base protocols:
+# - Uniswap V3 on Base
+# - Aerodrome
+# - Compound on Base
+```
+
+#### Cross-Chain Testing
+
+```bash
+# Test the same contract on different chains
+# Terminal 1: Fork Ethereum
+export FORK_CHAIN="ethereum"
+npx hardhat node --port 8545
+
+# Terminal 2: Fork Arbitrum  
+export FORK_CHAIN="arbitrum"
+npx hardhat node --port 8546
+
+# Now you can test cross-chain behavior
+```
 
 ## Default Accounts
 
