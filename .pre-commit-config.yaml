@@ -1,46 +1,33 @@
 repos:
--   repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.5.0
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
     hooks:
-    -   id: trailing-whitespace
-    -   id: end-of-file-fixer
-    -   id: check-yaml
-    -   id: check-toml
-    -   id: check-added-large-files
-    -   id: debug-statements
-    -   id: check-case-conflict
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-added-large-files
+      - id: debug-statements
+      - id: check-case-conflict
 
--   repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.3.3
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.11.4
     hooks:
-    -   id: ruff
+      - id: ruff
         args: [--fix]
-    -   id: ruff-format
+      - id: ruff-format
 
--   repo: local
+  - repo: local
     hooks:
-    -   id: mypy
+      - id: mypy
         name: mypy
-        entry: poetry run mypy
+        entry: uv run mypy --strict
         language: system
         types: [python]
-        require_serial: true
-        args: [--strict, --cache-dir=.mypy_cache]
+        files: ^blockchainpype/
 
--   repo: https://github.com/python-poetry/poetry
-    rev: '1.7.0'
+  - repo: https://github.com/python-jsonschema/check-jsonschema
+    rev: 0.31.3
     hooks:
-    -   id: poetry-check
-    -   id: poetry-lock
-        args: ["--check"]
-
--   repo: https://github.com/python-jsonschema/check-jsonschema
-    rev: 0.27.1
-    hooks:
-    -   id: check-github-workflows
-    -   id: check-dependabot
-
--   repo: https://github.com/pypa/pip-audit
-    rev: v2.6.1
-    hooks:
-    -   id: pip-audit
+      - id: check-github-workflows
+      - id: check-dependabot

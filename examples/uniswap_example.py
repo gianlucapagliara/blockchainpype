@@ -31,7 +31,7 @@ from examples.basic.configure import CustomBlockchainConfigurations
 logger = logging.getLogger(__name__)
 
 
-async def main():
+async def main() -> None:
     """Main example function."""
     BlockchainsInitializer.configure(
         configurations=CustomBlockchainConfigurations,

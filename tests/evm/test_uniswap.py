@@ -43,7 +43,7 @@ class MockEthereumAsset:
     @property
     def address(self) -> EthereumAddress:
         return self.identifier
-        
+
     @address.setter
     def address(self, value: EthereumAddress) -> None:
         self.identifier = value
@@ -98,23 +98,27 @@ def weth_asset():
 def mock_wallet(mock_blockchain):
     """Create a mock wallet for testing."""
     wallet = MagicMock(spec=EthereumWallet)
-    wallet.address = EthereumAddress.from_string("0x742d35Cc6634C0532925a3b8D2bC7a5Fad7b6e4F")
+    wallet.address = EthereumAddress.from_string(
+        "0x742d35Cc6634C0532925a3b8D2bC7a5Fad7b6e4F"
+    )
     wallet.blockchain = mock_blockchain
-    
+
     # Mock build_transaction to return valid TxParams
     async def mock_build_transaction(function=None, **kwargs):
-        return TxParams({
-            "to": "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D",
-            "from": wallet.address.raw,
-            "data": "0x38ed1739000000000000000000000000000000000000000000000000016345785d8a0000",
-            "gas": 200000,
-            "gasPrice": 20000000000,
-            "chainId": 1,
-            "nonce": 42
-        })
-    
+        return TxParams(
+            {
+                "to": "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D",
+                "from": wallet.address.raw,
+                "data": "0x38ed1739000000000000000000000000000000000000000000000000016345785d8a0000",
+                "gas": 200000,
+                "gasPrice": 20000000000,
+                "chainId": 1,
+                "nonce": 42,
+            }
+        )
+
     wallet.build_transaction = AsyncMock(side_effect=mock_build_transaction)
-    
+
     # Mock sign_and_send_transaction to return EthereumTransaction
     def mock_sign_and_send(client_operation_id, tx_data, **kwargs):
         transaction = MagicMock(spec=EthereumTransaction)
@@ -122,9 +126,9 @@ def mock_wallet(mock_blockchain):
         transaction.signed_transaction = MagicMock()
         transaction.signed_transaction.hash.hex.return_value = "0x123456789abcdef"
         return transaction
-    
+
     wallet.sign_and_send_transaction = MagicMock(side_effect=mock_sign_and_send)
-    
+
     return wallet
 
 
@@ -134,11 +138,12 @@ class TestUniswapV2Strategy:
     @pytest.fixture
     def v2_strategy(self, mock_blockchain):
         """Create a Uniswap V2 strategy instance."""
-        with patch(
-            "blockchainpype.evm.dapp.uniswap.v2.EthereumSmartContract"
-        ) as mock_contract_class, patch(
-            "financepype.operators.factory.OperatorFactory.get"
-        ) as mock_factory:
+        with (
+            patch(
+                "blockchainpype.evm.dapp.uniswap.v2.EthereumSmartContract"
+            ) as mock_contract_class,
+            patch("financepype.operators.factory.OperatorFactory.get") as mock_factory,
+        ):
             # Mock the factory to return a mock blockchain
             mock_factory.return_value = mock_blockchain
 
@@ -175,11 +180,15 @@ class TestUniswapV2Strategy:
 
             mock_swap_exact = MagicMock()
             mock_swap_exact.build_transaction = AsyncMock()
-            mock_router_contract.functions.swapExactTokensForTokens.return_value = mock_swap_exact
+            mock_router_contract.functions.swapExactTokensForTokens.return_value = (
+                mock_swap_exact
+            )
 
             mock_swap_for_exact = MagicMock()
             mock_swap_for_exact.build_transaction = AsyncMock()
-            mock_router_contract.functions.swapTokensForExactTokens.return_value = mock_swap_for_exact
+            mock_router_contract.functions.swapTokensForExactTokens.return_value = (
+                mock_swap_for_exact
+            )
 
             return strategy
 
@@ -190,26 +199,29 @@ class TestUniswapV2Strategy:
         v2_strategy.factory_contract.functions.getPair.return_value.call.return_value = "0x1234567890123456789012345678901234567890"
 
         # Mock pair contract
-        with patch(
-            "blockchainpype.evm.dapp.uniswap.v2.EthereumSmartContract"
-        ) as mock_pair_contract, patch(
-            "financepype.operators.factory.OperatorFactory.get"
-        ) as mock_factory, patch(
-            "blockchainpype.evm.dapp.uniswap.v2.SwapHop"
-        ) as mock_swap_hop_class, patch(
-            "blockchainpype.evm.dapp.uniswap.v2.SwapRoute"
-        ) as mock_swap_route_class:
+        with (
+            patch(
+                "blockchainpype.evm.dapp.uniswap.v2.EthereumSmartContract"
+            ) as mock_pair_contract,
+            patch("financepype.operators.factory.OperatorFactory.get") as mock_factory,
+            patch("blockchainpype.evm.dapp.uniswap.v2.SwapHop") as mock_swap_hop_class,
+            patch(
+                "blockchainpype.evm.dapp.uniswap.v2.SwapRoute"
+            ) as mock_swap_route_class,
+        ):
             mock_factory.return_value = MagicMock()
             pair_contract = mock_pair_contract.return_value
             pair_contract.initialize = AsyncMock()
-            pair_contract.functions.getReserves.return_value.call = AsyncMock(return_value=(
-                Decimal("1000000") * 10**6,
-                Decimal("1000") * 10**18,
-                1640995200,
-            ))  # getReserves
-            pair_contract.functions.token0.return_value.call = AsyncMock(return_value=str(
-                usdc_asset.address
-            ))  # token0
+            pair_contract.functions.getReserves.return_value.call = AsyncMock(
+                return_value=(
+                    Decimal("1000000") * 10**6,
+                    Decimal("1000") * 10**18,
+                    1640995200,
+                )
+            )  # getReserves
+            pair_contract.functions.token0.return_value.call = AsyncMock(
+                return_value=str(usdc_asset.address)
+            )  # token0
 
             # Mock SwapHop and SwapRoute
             mock_swap_hop = MagicMock()
@@ -260,22 +272,25 @@ class TestUniswapV2Strategy:
         v2_strategy.factory_contract.functions.getPair.return_value.call.return_value = "0x1234567890123456789012345678901234567890"
 
         # Mock pair contract
-        with patch(
-            "blockchainpype.evm.dapp.uniswap.v2.EthereumSmartContract"
-        ) as mock_pair_contract, patch(
-            "financepype.operators.factory.OperatorFactory.get"
-        ) as mock_factory:
+        with (
+            patch(
+                "blockchainpype.evm.dapp.uniswap.v2.EthereumSmartContract"
+            ) as mock_pair_contract,
+            patch("financepype.operators.factory.OperatorFactory.get") as mock_factory,
+        ):
             mock_factory.return_value = MagicMock()
             pair_contract = mock_pair_contract.return_value
             pair_contract.initialize = AsyncMock()
-            pair_contract.functions.getReserves.return_value.call = AsyncMock(return_value=(
-                1000000 * 10**6,
-                1000 * 10**18,
-                1640995200,
-            ))  # getReserves
-            pair_contract.functions.token0.return_value.call = AsyncMock(return_value=str(
-                usdc_asset.address
-            ))  # token0
+            pair_contract.functions.getReserves.return_value.call = AsyncMock(
+                return_value=(
+                    1000000 * 10**6,
+                    1000 * 10**18,
+                    1640995200,
+                )
+            )  # getReserves
+            pair_contract.functions.token0.return_value.call = AsyncMock(
+                return_value=str(usdc_asset.address)
+            )  # token0
 
             reserves = await v2_strategy.get_reserves(usdc_asset, weth_asset)
 
@@ -305,16 +320,20 @@ class TestUniswapV2Strategy:
 
         # Mock the contract function
         mock_function = MagicMock()
-        v2_strategy.router_contract.functions.swapExactTokensForTokens.return_value = mock_function
+        v2_strategy.router_contract.functions.swapExactTokensForTokens.return_value = (
+            mock_function
+        )
 
         # Test building swap transaction
         result = await v2_strategy.build_swap_transaction(
-            mock_route, mock_wallet, recipient="0x742d35Cc6634C0532925a3b8D2bC7a5Fad7b6e4F"
+            mock_route,
+            mock_wallet,
+            recipient="0x742d35Cc6634C0532925a3b8D2bC7a5Fad7b6e4F",
         )
 
         # Verify wallet.build_transaction was called with the contract function
         mock_wallet.build_transaction.assert_called_once_with(function=mock_function)
-        
+
         # Verify the result is the expected TxParams
         assert result["to"] == "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D"
         assert result["gas"] == 200000
@@ -344,7 +363,9 @@ class TestUniswapV2Strategy:
         assert amount_in_needed > 0
 
     @pytest.mark.asyncio
-    async def test_create_swap_transaction(self, v2_strategy, usdc_asset, weth_asset, mock_wallet):
+    async def test_create_swap_transaction(
+        self, v2_strategy, usdc_asset, weth_asset, mock_wallet
+    ):
         """Test creating a signed swap transaction."""
         # Create a mock route
         mock_route = MagicMock(spec=SwapRoute)
@@ -371,22 +392,22 @@ class TestUniswapV2Strategy:
 
         # Mock the contract function
         mock_function = MagicMock()
-        v2_strategy.router_contract.functions.swapExactTokensForTokens.return_value = mock_function
+        v2_strategy.router_contract.functions.swapExactTokensForTokens.return_value = (
+            mock_function
+        )
 
         # Test creating swap transaction
         result = await v2_strategy.create_swap_transaction(
-            route=mock_route,
-            wallet=mock_wallet,
-            client_operation_id="test_swap"
+            route=mock_route, wallet=mock_wallet, client_operation_id="test_swap"
         )
 
         # Verify wallet methods were called correctly
         mock_wallet.build_transaction.assert_called_once_with(function=mock_function)
         mock_wallet.sign_and_send_transaction.assert_called_once()
-        
+
         # Verify the result is an EthereumTransaction
         assert result.client_operation_id == "test_swap"
-        assert hasattr(result, 'signed_transaction')
+        assert hasattr(result, "signed_transaction")
 
     @pytest.mark.asyncio
     async def test_execute_swap(self, v2_strategy, usdc_asset, weth_asset, mock_wallet):
@@ -399,7 +420,7 @@ class TestUniswapV2Strategy:
         mock_route.output_amount = Decimal("0.05")
         mock_route.mode = SwapMode.EXACT_INPUT
         mock_route.max_slippage = Decimal("0.005")
-        
+
         # Create mock hop
         mock_hop = MagicMock()
         mock_hop.input_asset = usdc_asset
@@ -408,8 +429,10 @@ class TestUniswapV2Strategy:
         mock_hop.output_amount = Decimal("0.05")
         mock_route.sequence = [mock_hop]
 
-        with patch.object(v2_strategy, 'quote_swap', return_value=mock_route) as mock_quote:
-            with patch.object(v2_strategy, 'create_swap_transaction') as mock_create_tx:
+        with patch.object(
+            v2_strategy, "quote_swap", return_value=mock_route
+        ) as mock_quote:
+            with patch.object(v2_strategy, "create_swap_transaction") as mock_create_tx:
                 mock_transaction = MagicMock(spec=EthereumTransaction)
                 mock_transaction.client_operation_id = "direct_swap_test"
                 mock_create_tx.return_value = mock_transaction
@@ -421,7 +444,7 @@ class TestUniswapV2Strategy:
                     amount=Decimal("100"),
                     wallet=mock_wallet,
                     mode=SwapMode.EXACT_INPUT,
-                    client_operation_id="direct_swap_test"
+                    client_operation_id="direct_swap_test",
                 )
 
                 # Verify quote_swap was called
@@ -434,7 +457,7 @@ class TestUniswapV2Strategy:
                     route=mock_route,
                     wallet=mock_wallet,
                     recipient=None,
-                    client_operation_id="direct_swap_test"
+                    client_operation_id="direct_swap_test",
                 )
 
                 # Verify the result
@@ -442,13 +465,15 @@ class TestUniswapV2Strategy:
                 assert result.client_operation_id == "direct_swap_test"
 
     @pytest.mark.asyncio
-    async def test_build_swap_transaction_uses_wallet_address_as_default_recipient(self, v2_strategy, usdc_asset, weth_asset, mock_wallet):
+    async def test_build_swap_transaction_uses_wallet_address_as_default_recipient(
+        self, v2_strategy, usdc_asset, weth_asset, mock_wallet
+    ):
         """Test that wallet address is used as default recipient."""
         # Create a mock route
         mock_route = MagicMock()
         mock_route.mode = SwapMode.EXACT_INPUT
         mock_route.max_slippage = Decimal("0.005")
-        
+
         # Create mock hop
         mock_hop = MagicMock()
         mock_hop.input_asset = usdc_asset
@@ -467,24 +492,30 @@ class TestUniswapV2Strategy:
 
         # Mock the contract function
         mock_function = MagicMock()
-        v2_strategy.router_contract.functions.swapExactTokensForTokens.return_value = mock_function
+        v2_strategy.router_contract.functions.swapExactTokensForTokens.return_value = (
+            mock_function
+        )
 
         # Test building swap transaction without specifying recipient
         await v2_strategy.build_swap_transaction(mock_route, mock_wallet)
 
         # Verify that the swapExactTokensForTokens was called with wallet address as recipient
-        args, kwargs = v2_strategy.router_contract.functions.swapExactTokensForTokens.call_args
+        args, kwargs = (
+            v2_strategy.router_contract.functions.swapExactTokensForTokens.call_args
+        )
         recipient_arg = args[3]  # recipient is the 4th argument (0-indexed)
         assert recipient_arg == mock_wallet.address.raw
 
     @pytest.mark.asyncio
-    async def test_create_swap_transaction_auto_generates_operation_id(self, v2_strategy, usdc_asset, weth_asset, mock_wallet):
+    async def test_create_swap_transaction_auto_generates_operation_id(
+        self, v2_strategy, usdc_asset, weth_asset, mock_wallet
+    ):
         """Test that operation ID is auto-generated when not provided."""
         # Create a mock route
         mock_route = MagicMock(spec=SwapRoute)
         mock_route.input_asset = usdc_asset
         mock_route.output_asset = weth_asset
-        
+
         # Mock asset addresses
         usdc_asset.address = EthereumAddress.from_string(
             "0xA0b86a33E6441b29205ab6F5b10C0B7B5C7f1b4e"
@@ -492,7 +523,7 @@ class TestUniswapV2Strategy:
         weth_asset.address = EthereumAddress.from_string(
             "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
         )
-        
+
         # Create mock hop
         mock_hop = MagicMock()
         mock_hop.input_asset = usdc_asset
@@ -503,19 +534,20 @@ class TestUniswapV2Strategy:
 
         # Mock the contract function
         mock_function = MagicMock()
-        v2_strategy.router_contract.functions.swapExactTokensForTokens.return_value = mock_function
+        v2_strategy.router_contract.functions.swapExactTokensForTokens.return_value = (
+            mock_function
+        )
 
         # Test creating swap transaction without operation ID
         result = await v2_strategy.create_swap_transaction(
-            route=mock_route,
-            wallet=mock_wallet
+            route=mock_route, wallet=mock_wallet
         )
 
         # Verify that sign_and_send_transaction was called with an auto-generated ID
         call_args = mock_wallet.sign_and_send_transaction.call_args
-        operation_id = call_args[1]['client_operation_id']
-        
-        assert operation_id.startswith('uniswap_v2_swap_')
+        operation_id = call_args[1]["client_operation_id"]
+
+        assert operation_id.startswith("uniswap_v2_swap_")
         assert usdc_asset.address.raw[:8] in operation_id
         assert weth_asset.address.raw[:8] in operation_id
 
@@ -526,11 +558,12 @@ class TestUniswapV3Strategy:
     @pytest.fixture
     def v3_strategy(self, mock_blockchain):
         """Create a Uniswap V3 strategy instance."""
-        with patch(
-            "blockchainpype.evm.dapp.uniswap.v3.EthereumSmartContract"
-        ) as mock_contract_class, patch(
-            "financepype.operators.factory.OperatorFactory.get"
-        ) as mock_factory:
+        with (
+            patch(
+                "blockchainpype.evm.dapp.uniswap.v3.EthereumSmartContract"
+            ) as mock_contract_class,
+            patch("financepype.operators.factory.OperatorFactory.get") as mock_factory,
+        ):
             # Mock the factory to return a mock blockchain
             mock_factory.return_value = mock_blockchain
 
@@ -575,11 +608,15 @@ class TestUniswapV3Strategy:
 
             mock_quote_exact_input = MagicMock()
             mock_quote_exact_input.call = AsyncMock()
-            mock_quoter_contract.functions.quoteExactInputSingle.return_value = mock_quote_exact_input
+            mock_quoter_contract.functions.quoteExactInputSingle.return_value = (
+                mock_quote_exact_input
+            )
 
             mock_quote_exact_output = MagicMock()
             mock_quote_exact_output.call = AsyncMock()
-            mock_quoter_contract.functions.quoteExactOutputSingle.return_value = mock_quote_exact_output
+            mock_quoter_contract.functions.quoteExactOutputSingle.return_value = (
+                mock_quote_exact_output
+            )
 
             return strategy
 
@@ -621,9 +658,12 @@ class TestUniswapV3Strategy:
         v3_strategy.quoter_contract.functions.quoteExactInputSingle.return_value.call.side_effect = mock_quoter_call
 
         # Mock SwapHop and SwapRoute to avoid Pydantic validation
-        with patch("blockchainpype.evm.dapp.uniswap.v3.SwapHop") as mock_swap_hop_class, \
-             patch("blockchainpype.evm.dapp.uniswap.v3.SwapRoute") as mock_swap_route_class:
-
+        with (
+            patch("blockchainpype.evm.dapp.uniswap.v3.SwapHop") as mock_swap_hop_class,
+            patch(
+                "blockchainpype.evm.dapp.uniswap.v3.SwapRoute"
+            ) as mock_swap_route_class,
+        ):
             mock_swap_hop = MagicMock()
             mock_swap_hop_class.return_value = mock_swap_hop
 
@@ -665,21 +705,24 @@ class TestUniswapV3Strategy:
         v3_strategy.factory_contract.functions.getPool.return_value.call.return_value = "0x1234567890123456789012345678901234567890"
 
         # Mock pool contract
-        with patch(
-            "blockchainpype.evm.dapp.uniswap.v3.EthereumSmartContract"
-        ) as mock_pool_contract, patch(
-            "financepype.operators.factory.OperatorFactory.get"
-        ) as mock_factory:
+        with (
+            patch(
+                "blockchainpype.evm.dapp.uniswap.v3.EthereumSmartContract"
+            ) as mock_pool_contract,
+            patch("financepype.operators.factory.OperatorFactory.get") as mock_factory,
+        ):
             mock_factory.return_value = MagicMock()
             pool_contract = mock_pool_contract.return_value
             pool_contract.initialize = AsyncMock()
-            pool_contract.functions.liquidity.return_value.call = AsyncMock(return_value=1000000)  # liquidity
-            pool_contract.functions.slot0.return_value.call = AsyncMock(return_value=(
-                79228162514264337593543950336,
-            ))  # slot0 - sqrtPriceX96
-            pool_contract.functions.token0.return_value.call = AsyncMock(return_value=str(
-                usdc_asset.address
-            ))  # token0
+            pool_contract.functions.liquidity.return_value.call = AsyncMock(
+                return_value=1000000
+            )  # liquidity
+            pool_contract.functions.slot0.return_value.call = AsyncMock(
+                return_value=(79228162514264337593543950336,)
+            )  # slot0 - sqrtPriceX96
+            pool_contract.functions.token0.return_value.call = AsyncMock(
+                return_value=str(usdc_asset.address)
+            )  # token0
 
             reserves = await v3_strategy.get_reserves(usdc_asset, weth_asset)
 
@@ -712,23 +755,29 @@ class TestUniswapV3Strategy:
 
         # Mock the contract function
         mock_function = MagicMock()
-        v3_strategy.router_contract.functions.exactInputSingle.return_value = mock_function
+        v3_strategy.router_contract.functions.exactInputSingle.return_value = (
+            mock_function
+        )
 
         # Test building swap transaction
         result = await v3_strategy.build_swap_transaction(
-            mock_route, mock_wallet, recipient="0x742d35Cc6634C0532925a3b8D2bC7a5Fad7b6e4F"
+            mock_route,
+            mock_wallet,
+            recipient="0x742d35Cc6634C0532925a3b8D2bC7a5Fad7b6e4F",
         )
 
         # Verify wallet.build_transaction was called with the contract function
         mock_wallet.build_transaction.assert_called_once_with(function=mock_function)
-        
+
         # Verify the result is the expected TxParams
         assert result["to"] == "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D"
         assert result["gas"] == 200000
         assert "data" in result
 
     @pytest.mark.asyncio
-    async def test_create_swap_transaction_v3(self, v3_strategy, usdc_asset, weth_asset, mock_wallet):
+    async def test_create_swap_transaction_v3(
+        self, v3_strategy, usdc_asset, weth_asset, mock_wallet
+    ):
         """Test creating a signed V3 swap transaction."""
         # Create a mock route
         mock_route = MagicMock(spec=SwapRoute)
@@ -756,25 +805,27 @@ class TestUniswapV3Strategy:
 
         # Mock the contract function
         mock_function = MagicMock()
-        v3_strategy.router_contract.functions.exactInputSingle.return_value = mock_function
+        v3_strategy.router_contract.functions.exactInputSingle.return_value = (
+            mock_function
+        )
 
         # Test creating swap transaction
         result = await v3_strategy.create_swap_transaction(
-            route=mock_route,
-            wallet=mock_wallet,
-            client_operation_id="test_v3_swap"
+            route=mock_route, wallet=mock_wallet, client_operation_id="test_v3_swap"
         )
 
         # Verify wallet methods were called correctly
         mock_wallet.build_transaction.assert_called_once_with(function=mock_function)
         mock_wallet.sign_and_send_transaction.assert_called_once()
-        
+
         # Verify the result is an EthereumTransaction
         assert result.client_operation_id == "test_v3_swap"
-        assert hasattr(result, 'signed_transaction')
+        assert hasattr(result, "signed_transaction")
 
     @pytest.mark.asyncio
-    async def test_execute_swap_v3(self, v3_strategy, usdc_asset, weth_asset, mock_wallet):
+    async def test_execute_swap_v3(
+        self, v3_strategy, usdc_asset, weth_asset, mock_wallet
+    ):
         """Test executing a complete V3 swap operation."""
         # Mock the quote_swap method
         mock_route = MagicMock(spec=SwapRoute)
@@ -785,7 +836,7 @@ class TestUniswapV3Strategy:
         mock_route.mode = SwapMode.EXACT_INPUT
         mock_route.max_slippage = Decimal("0.005")
         mock_route.protocol = "uniswap_v3_3000"
-        
+
         # Create mock hop
         mock_hop = MagicMock()
         mock_hop.input_asset = usdc_asset
@@ -794,8 +845,10 @@ class TestUniswapV3Strategy:
         mock_hop.output_amount = Decimal("0.05")
         mock_route.sequence = [mock_hop]
 
-        with patch.object(v3_strategy, 'quote_swap', return_value=mock_route) as mock_quote:
-            with patch.object(v3_strategy, 'create_swap_transaction') as mock_create_tx:
+        with patch.object(
+            v3_strategy, "quote_swap", return_value=mock_route
+        ) as mock_quote:
+            with patch.object(v3_strategy, "create_swap_transaction") as mock_create_tx:
                 mock_transaction = MagicMock(spec=EthereumTransaction)
                 mock_transaction.client_operation_id = "direct_v3_swap_test"
                 mock_create_tx.return_value = mock_transaction
@@ -807,7 +860,7 @@ class TestUniswapV3Strategy:
                     amount=Decimal("100"),
                     wallet=mock_wallet,
                     mode=SwapMode.EXACT_INPUT,
-                    client_operation_id="direct_v3_swap_test"
+                    client_operation_id="direct_v3_swap_test",
                 )
 
                 # Verify quote_swap was called
@@ -820,7 +873,7 @@ class TestUniswapV3Strategy:
                     route=mock_route,
                     wallet=mock_wallet,
                     recipient=None,
-                    client_operation_id="direct_v3_swap_test"
+                    client_operation_id="direct_v3_swap_test",
                 )
 
                 # Verify the result
@@ -828,14 +881,16 @@ class TestUniswapV3Strategy:
                 assert result.client_operation_id == "direct_v3_swap_test"
 
     @pytest.mark.asyncio
-    async def test_create_swap_transaction_auto_generates_operation_id_v3(self, v3_strategy, usdc_asset, weth_asset, mock_wallet):
+    async def test_create_swap_transaction_auto_generates_operation_id_v3(
+        self, v3_strategy, usdc_asset, weth_asset, mock_wallet
+    ):
         """Test that V3 operation ID is auto-generated when not provided."""
         # Create a mock route
         mock_route = MagicMock(spec=SwapRoute)
         mock_route.input_asset = usdc_asset
         mock_route.output_asset = weth_asset
         mock_route.protocol = "uniswap_v3_3000"
-        
+
         # Mock asset addresses
         usdc_asset.address = EthereumAddress.from_string(
             "0xA0b86a33E6441b29205ab6F5b10C0B7B5C7f1b4e"
@@ -843,7 +898,7 @@ class TestUniswapV3Strategy:
         weth_asset.address = EthereumAddress.from_string(
             "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
         )
-        
+
         # Create mock hop
         mock_hop = MagicMock()
         mock_hop.input_asset = usdc_asset
@@ -854,22 +909,23 @@ class TestUniswapV3Strategy:
 
         # Mock the contract function
         mock_function = MagicMock()
-        v3_strategy.router_contract.functions.exactInputSingle.return_value = mock_function
+        v3_strategy.router_contract.functions.exactInputSingle.return_value = (
+            mock_function
+        )
 
         # Test creating swap transaction without operation ID
         result = await v3_strategy.create_swap_transaction(
-            route=mock_route,
-            wallet=mock_wallet
+            route=mock_route, wallet=mock_wallet
         )
 
         # Verify that sign_and_send_transaction was called with an auto-generated ID
         call_args = mock_wallet.sign_and_send_transaction.call_args
-        operation_id = call_args[1]['client_operation_id']
-        
-        assert operation_id.startswith('uniswap_v3_swap_')
+        operation_id = call_args[1]["client_operation_id"]
+
+        assert operation_id.startswith("uniswap_v3_swap_")
         assert usdc_asset.address.raw[:8] in operation_id
         assert weth_asset.address.raw[:8] in operation_id
-        assert '3000' in operation_id  # fee tier
+        assert "3000" in operation_id  # fee tier
 
 
 class TestUniswapDEX:

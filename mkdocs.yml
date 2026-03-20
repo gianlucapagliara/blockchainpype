@@ -1,0 +1,28 @@
+site_name: BlockchainPype
+site_url: https://gianlucapagliara.github.io/blockchainpype/
+site_description: A Python library for interacting with multiple blockchain networks
+site_author: Gianluca Pagliara
+repo_url: https://github.com/gianlucapagliara/blockchainpype
+repo_name: gianlucapagliara/blockchainpype
+
+theme:
+  name: readthedocs
+  highlightjs: true
+  hljs_languages:
+    - python
+    - bash
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - toc:
+      permalink: true
+  - codehilite:
+      guess_lang: false
+  - def_list
+  - attr_list
+
+nav:
+  - Home: index.md

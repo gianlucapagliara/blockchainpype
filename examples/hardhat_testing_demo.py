@@ -55,7 +55,7 @@ async def main():
         print("\n4. Checking account balances...")
         for i, account in enumerate(test_accounts[:3]):  # Show first 3 accounts
             balance = await env.get_account_balance(account)
-            print(f"   💰 Account {i+1}: {balance:.2f} ETH")
+            print(f"   💰 Account {i + 1}: {balance:.2f} ETH")
 
         # Test deployed contracts
         print("\n5. Checking deployed contracts...")
@@ -172,7 +172,7 @@ def demo_utility_functions():
     accounts = get_hardhat_accounts()
     print(f"Default Hardhat accounts: {len(accounts)}")
     for i, account in enumerate(accounts[:3]):
-        print(f"  Account {i+1}: {account}")
+        print(f"  Account {i + 1}: {account}")
 
     # Show deterministic nature
     print(f"\nFirst account (always the same): {accounts[0]}")

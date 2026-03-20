@@ -17,15 +17,13 @@ from pydantic import ValidationError
 from blockchainpype.dapps.betting_market import (
     BettingMarketAction,
     BettingMarketConfiguration,
-)
-from blockchainpype.dapps.betting_market import BettingMarketModel as BettingMarket
-from blockchainpype.dapps.betting_market import (
     BettingPosition,
     MarketOutcome,
     MarketStatus,
     OutcomeToken,
     ProtocolConfiguration,
 )
+from blockchainpype.dapps.betting_market import BettingMarketModel as BettingMarket
 
 # Import the BlockchainAsset from betting market models
 from blockchainpype.dapps.betting_market.models import BlockchainAsset

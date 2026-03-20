@@ -397,7 +397,9 @@ class UniswapV3(ProtocolImplementation):
             input_asset_id = cast(EthereumAsset, route.input_asset).address.raw[:8]
             output_asset_id = cast(EthereumAsset, route.output_asset).address.raw[:8]
             fee_tier = route.protocol.split("_")[-1]
-            client_operation_id = f"uniswap_v3_swap_{input_asset_id}_{output_asset_id}_{fee_tier}"
+            client_operation_id = (
+                f"uniswap_v3_swap_{input_asset_id}_{output_asset_id}_{fee_tier}"
+            )
 
         # Build the transaction parameters
         tx_params = await self.build_swap_transaction(route, wallet, recipient)

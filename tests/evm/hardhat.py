@@ -402,7 +402,7 @@ def event_loop():
 
 
 @pytest_asyncio.fixture(scope="session")
-async def hardhat_env(hardhat_dir) -> AsyncGenerator[HardhatTestEnvironment, None]:
+async def hardhat_env(hardhat_dir) -> AsyncGenerator[HardhatTestEnvironment]:
     """Complete Hardhat test environment."""
     env = HardhatTestEnvironment(hardhat_dir)
     await env.setup()
@@ -429,7 +429,7 @@ async def deployed_contracts(hardhat_env) -> dict[str, str]:
 
 
 @pytest_asyncio.fixture(scope="function")
-async def blockchain_snapshot(hardhat_env) -> AsyncGenerator[str, None]:
+async def blockchain_snapshot(hardhat_env) -> AsyncGenerator[str]:
     """Take a snapshot before test and revert after."""
     snapshot_id = await hardhat_env.snapshot()
     yield snapshot_id

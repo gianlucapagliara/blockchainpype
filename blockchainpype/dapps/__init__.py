@@ -12,10 +12,10 @@ from .money_market import (
     MoneyMarket,
     MoneyMarketAction,
     MoneyMarketConfiguration,
+    UserAccountData,
 )
 from .money_market import ProtocolConfiguration as MoneyMarketProtocolConfiguration
 from .money_market import ProtocolImplementation as MoneyMarketProtocolImplementation
-from .money_market import UserAccountData
 
 # Betting Market imports
 try:
