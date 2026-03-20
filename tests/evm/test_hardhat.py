@@ -119,7 +119,6 @@ class TestHardhatContracts:
     ):
         """Test interaction with ERC20 token contract."""
         token_address = deployed_contracts["TestToken"]
-        owner = test_accounts[0]
 
         # Check that token contract is deployed
         assert Web3.is_address(token_address)
@@ -245,7 +244,6 @@ class TestHardhatIntegration:
 
         # 3. Test token balance
         token_address = deployed_contracts["TestToken"]
-        owner = test_accounts[0]
 
         # Check that token contract is deployed and has code
         assert Web3.is_address(token_address)

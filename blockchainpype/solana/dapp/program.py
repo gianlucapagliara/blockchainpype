@@ -4,7 +4,7 @@ It implements program configuration, initialization, and instruction building ca
 through Solders' interfaces.
 """
 
-from typing import cast
+from typing import Any, cast
 
 from financepype.operators.dapps.dapp import (
     DecentralizedApplication,
@@ -58,7 +58,7 @@ class SolanaProgram(DecentralizedApplication):
         """
         super().__init__(configuration)
 
-        self._idl: dict | None = None
+        self._idl: dict[str, object] | None = None
 
     @property
     def configuration(self) -> SolanaProgramConfiguration:
@@ -91,7 +91,7 @@ class SolanaProgram(DecentralizedApplication):
         return self.configuration.address
 
     @property
-    def idl(self) -> dict | None:
+    def idl(self) -> dict[str, object] | None:
         """
         Get the program's IDL data.
 
@@ -145,7 +145,7 @@ class SolanaProgram(DecentralizedApplication):
         if not self.is_initialized:
             raise ValueError("Program is not initialized")
 
-        idl = self.idl or {}
+        idl: dict[str, Any] = self.idl or {}
         instructions = idl.get("instructions", {})
         if name not in instructions:
             raise ValueError(f"Invalid instruction name: {name}")

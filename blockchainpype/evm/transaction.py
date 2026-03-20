@@ -212,7 +212,7 @@ class EthereumRawTransaction(BaseModel):
         }
         kwargs = {k: v for k, v in kwargs.items() if v is not None}
 
-        return cls(**kwargs)
+        return cls(**kwargs)  # type: ignore[arg-type]
 
 
 class EthereumTransaction(BlockchainTransaction):

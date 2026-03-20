@@ -4,7 +4,7 @@ Provides integration with Aave's lending pool and data provider contracts.
 """
 
 from decimal import Decimal
-from typing import cast
+from typing import Any, cast
 
 from financepype.assets.blockchain import BlockchainAsset
 
@@ -19,6 +19,7 @@ from blockchainpype.dapps.money_market import (
     UserAccountData,
 )
 from blockchainpype.evm.asset import EthereumAsset
+from blockchainpype.evm.blockchain.blockchain import EthereumBlockchainType
 from blockchainpype.evm.blockchain.identifier import EthereumAddress
 from blockchainpype.evm.dapp.abi import EthereumLocalFileABI
 from blockchainpype.evm.dapp.contract import (
@@ -33,7 +34,7 @@ from .money_market import EVMMoneyMarket, EVMMoneyMarketConfiguration
 class AaveV3Configuration(EVMMoneyMarketConfiguration):
     """Configuration for Aave V3 protocol."""
 
-    def __init__(self, **data):
+    def __init__(self, **data: Any) -> None:
         super().__init__(**data)
         # Ensure we have Aave-specific protocol configuration
         if not any("aave" in p.protocol_name.lower() for p in self.protocols):
@@ -45,14 +46,12 @@ class AaveV3Configuration(EVMMoneyMarketConfiguration):
 class AaveV3PoolContract(EthereumSmartContract):
     """Aave V3 Pool contract interface."""
 
-    def __init__(self, address: EthereumAddress):
+    def __init__(self, address: EthereumAddress) -> None:
         from financepype.operators.blockchains.models import BlockchainPlatform
-
-        from blockchainpype.initializer import SupportedBlockchainType
 
         platform = BlockchainPlatform(
             identifier="ethereum",
-            type=SupportedBlockchainType.EVM.value,
+            type=EthereumBlockchainType,
             chain_id=1,
         )
         config = EthereumContractConfiguration(
@@ -66,14 +65,12 @@ class AaveV3PoolContract(EthereumSmartContract):
 class AaveV3DataProviderContract(EthereumSmartContract):
     """Aave V3 Pool Data Provider contract interface."""
 
-    def __init__(self, address: EthereumAddress):
+    def __init__(self, address: EthereumAddress) -> None:
         from financepype.operators.blockchains.models import BlockchainPlatform
-
-        from blockchainpype.initializer import SupportedBlockchainType
 
         platform = BlockchainPlatform(
             identifier="ethereum",
-            type=SupportedBlockchainType.EVM.value,
+            type=EthereumBlockchainType,
             chain_id=1,
         )
         config = EthereumContractConfiguration(
@@ -89,7 +86,7 @@ class AaveV3DataProviderContract(EthereumSmartContract):
 class AaveV3(ProtocolImplementation):
     """Aave V3 protocol implementation."""
 
-    def __init__(self, protocol_config: ProtocolConfiguration, blockchain):
+    def __init__(self, protocol_config: ProtocolConfiguration, blockchain: Any) -> None:
         self.protocol_config = protocol_config
         self.blockchain = blockchain
 
@@ -222,7 +219,7 @@ class AaveV3(ProtocolImplementation):
 
         return EthereumTransaction(
             to=self.pool_contract.address,
-            data=function_call.build_transaction()["data"],
+            data=(await function_call.build_transaction())["data"],
             value=0,
         )
 
@@ -250,7 +247,7 @@ class AaveV3(ProtocolImplementation):
 
         return EthereumTransaction(
             to=self.pool_contract.address,
-            data=function_call.build_transaction()["data"],
+            data=(await function_call.build_transaction())["data"],
             value=0,
         )
 
@@ -284,7 +281,7 @@ class AaveV3(ProtocolImplementation):
 
         return EthereumTransaction(
             to=self.pool_contract.address,
-            data=function_call.build_transaction()["data"],
+            data=(await function_call.build_transaction())["data"],
             value=0,
         )
 
@@ -321,7 +318,7 @@ class AaveV3(ProtocolImplementation):
 
         return EthereumTransaction(
             to=self.pool_contract.address,
-            data=function_call.build_transaction()["data"],
+            data=(await function_call.build_transaction())["data"],
             value=0,
         )
 
@@ -345,7 +342,7 @@ class AaveV3(ProtocolImplementation):
 
         return EthereumTransaction(
             to=self.pool_contract.address,
-            data=function_call.build_transaction()["data"],
+            data=(await function_call.build_transaction())["data"],
             value=0,
         )
 
@@ -378,7 +375,7 @@ class AaveV3(ProtocolImplementation):
 
         return EthereumTransaction(
             to=self.pool_contract.address,
-            data=function_call.build_transaction()["data"],
+            data=(await function_call.build_transaction())["data"],
             value=0,
         )
 

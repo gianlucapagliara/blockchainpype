@@ -4,6 +4,8 @@ It includes implementations for standard contracts like ERC-20 tokens and provid
 base classes for building custom contract interfaces.
 """
 
+from typing import Any
+
 from .money_market import (
     AaveV3,
     AaveV3Configuration,
@@ -15,6 +17,13 @@ from .money_market import (
 )
 
 # Betting Market imports
+_betting_market_available = False
+EVMBettingMarket: Any = None
+EVMBettingMarketConfiguration: Any = None
+Polymarket: Any = None
+PolymarketConfiguration: Any = None
+PolymarketBettingMarket: Any = None
+
 try:
     from .betting_market import (
         EVMBettingMarket,
@@ -26,12 +35,7 @@ try:
 
     _betting_market_available = True
 except ImportError:
-    EVMBettingMarket = None
-    EVMBettingMarketConfiguration = None
-    Polymarket = None
-    PolymarketConfiguration = None
-    PolymarketBettingMarket = None
-    _betting_market_available = False
+    pass
 
 __all__ = [
     "EVMMoneyMarket",

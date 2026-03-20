@@ -75,7 +75,7 @@ class UniswapV3(ProtocolImplementation):
         # Common fee tiers for Uniswap V3
         self.fee_tiers = [100, 500, 3000, 10000]  # 0.01%, 0.05%, 0.3%, 1%
 
-    async def _ensure_contracts_initialized(self):
+    async def _ensure_contracts_initialized(self) -> None:
         """Ensure factory, router, and quoter contracts are initialized."""
         if not self.factory_contract.is_initialized:
             await self.factory_contract.initialize()
@@ -281,7 +281,7 @@ class UniswapV3(ProtocolImplementation):
 
         return (reserve_a, reserve_b)
 
-    async def build_swap_transaction(
+    async def build_swap_transaction(  # type: ignore[override]
         self,
         route: SwapRoute,
         wallet: EthereumWallet,
@@ -451,6 +451,7 @@ class UniswapV3(ProtocolImplementation):
     ) -> str:
         """Get the pool address for two assets and a specific fee tier."""
         await self._ensure_contracts_initialized()
-        return await self.factory_contract.functions.getPool(
+        result: str = await self.factory_contract.functions.getPool(
             asset_a.address.raw, asset_b.address.raw, fee
         ).call()
+        return result

@@ -10,7 +10,6 @@ from pydantic import ConfigDict, Field
 from solana.rpc.types import TokenAccountOpts
 from solders.instruction import AccountMeta
 from solders.message import Message
-from solders.transaction import VersionedTransaction
 
 from blockchainpype.solana.asset import SolanaAsset
 from blockchainpype.solana.blockchain.identifier import SolanaAddress
@@ -126,8 +125,6 @@ class SPLTokenProgram(SolanaProgram):
             authority.raw,
             recent_blockhash,
         )
-        transaction = VersionedTransaction(message, [])
-
         raw_transaction = SolanaRawTransaction(
             message=message,
             signatures=[],

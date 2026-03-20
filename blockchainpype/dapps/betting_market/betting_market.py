@@ -4,7 +4,10 @@ from typing import Protocol
 from financepype.operations.transactions.transaction import BlockchainTransaction
 from financepype.operators.dapps.dapp import DecentralizedApplication
 
-from .models import BettingMarket, BettingMarketConfiguration, BettingPosition
+from .models import BettingMarket as BettingMarketModel
+from .models import BettingMarketConfiguration, BettingPosition
+
+__all__ = ["BettingMarket", "ProtocolImplementation"]
 
 
 class ProtocolImplementation(Protocol):
@@ -13,7 +16,7 @@ class ProtocolImplementation(Protocol):
     async def get_market(
         self,
         market_id: str,
-    ) -> BettingMarket:
+    ) -> BettingMarketModel:
         """Get detailed information about a specific market."""
         ...
 
@@ -23,7 +26,7 @@ class ProtocolImplementation(Protocol):
         status: str | None = None,
         limit: int = 100,
         offset: int = 0,
-    ) -> list[BettingMarket]:
+    ) -> list[BettingMarketModel]:
         """Get list of available markets with optional filtering."""
         ...
 
@@ -118,7 +121,7 @@ class BettingMarket(DecentralizedApplication):
         self,
         market_id: str,
         protocol: str | None = None,
-    ) -> BettingMarket:
+    ) -> BettingMarketModel:
         """Get detailed information about a specific market.
 
         Args:
@@ -135,7 +138,7 @@ class BettingMarket(DecentralizedApplication):
         limit: int = 100,
         offset: int = 0,
         protocol: str | None = None,
-    ) -> list[BettingMarket]:
+    ) -> list[BettingMarketModel]:
         """Get list of available markets with optional filtering.
 
         Args:
@@ -150,7 +153,7 @@ class BettingMarket(DecentralizedApplication):
             return await protocol_impl.get_markets(category, status, limit, offset)
 
         # Aggregate markets from all protocols
-        all_markets: list[BettingMarket] = []
+        all_markets: list[BettingMarketModel] = []
         for strategy in self._protocol_strategies.values():
             markets = await strategy.get_markets(category, status, limit, offset)
             all_markets.extend(markets)

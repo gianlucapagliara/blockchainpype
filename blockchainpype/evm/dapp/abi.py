@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from abc import abstractmethod
+from typing import Any
 
 import aiohttp
 from pydantic import BaseModel, ConfigDict, Field
@@ -23,12 +24,12 @@ class EthereumABI(BaseModel):
     """
 
     @abstractmethod
-    async def get_abi(self) -> list | dict:
+    async def get_abi(self) -> list[Any] | dict[str, Any]:
         """
         Retrieve the contract ABI.
 
         Returns:
-            list | dict: The contract ABI as a list of function/event definitions or dict
+            list[Any] | dict[str, Any]: The contract ABI as a list of function/event definitions or dict
 
         Raises:
             NotImplementedError: This method must be implemented by subclasses
@@ -47,14 +48,14 @@ class EthereumDictABI(EthereumABI):
         abi (dict): The contract ABI stored as a dictionary
     """
 
-    abi: dict
+    abi: dict[str, Any]
 
-    async def get_abi(self) -> list | dict:
+    async def get_abi(self) -> list[Any] | dict[str, Any]:
         """
         Retrieve the contract ABI from the stored dictionary.
 
         Returns:
-            list | dict: The contract ABI
+            list[Any] | dict[str, Any]: The contract ABI
         """
         return self.abi
 
@@ -84,12 +85,12 @@ class EthereumLocalFileABI(EthereumABI):
         """
         return os.path.join(self.folder_path, self.file_name)
 
-    async def get_abi(self) -> list | dict:
+    async def get_abi(self) -> list[Any] | dict[str, Any]:
         """
         Load and retrieve the contract ABI from the local file.
 
         Returns:
-            list | dict: The contract ABI as a list of function/event definitions or dict
+            list[Any] | dict[str, Any]: The contract ABI as a list of function/event definitions or dict
 
         Raises:
             FileNotFoundError: If the ABI file doesn't exist
@@ -97,11 +98,12 @@ class EthereumLocalFileABI(EthereumABI):
             KeyError: If the file doesn't contain a valid ABI structure
         """
         with open(self.file_path) as file:
-            data = json.load(file)
+            data: Any = json.load(file)
 
             # Handle Hardhat artifact format
             if isinstance(data, dict) and "abi" in data:
-                return data["abi"]
+                abi: list[Any] | dict[str, Any] = data["abi"]
+                return abi
 
             # Handle direct ABI array format
             if isinstance(data, list):
@@ -130,7 +132,7 @@ class EthereumEtherscanABI(EthereumABI):
     contract_address: EthereumAddress
     request_timeout_seconds: float | None = 10.0
 
-    async def get_abi(self) -> list | dict:
+    async def get_abi(self) -> list[Any] | dict[str, Any]:
         """Retrieve and decode the remote ABI."""
 
         timeout = (

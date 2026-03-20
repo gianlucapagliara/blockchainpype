@@ -5,7 +5,7 @@ through Solders integration.
 """
 
 from decimal import Decimal
-from typing import cast
+from typing import Any, cast
 
 from financepype.operations.transactions.models import (
     BlockchainTransactionState,
@@ -159,7 +159,7 @@ class SolanaBlockchain(Blockchain):
                 commitment=self.commitment,
             )
         ).value
-        return self.native_asset.convert_to_decimals(balance)
+        return Decimal(self.native_asset.convert_to_decimals(balance))
 
     # === Transactions ===
 
@@ -175,8 +175,12 @@ class SolanaBlockchain(Blockchain):
         Returns:
             SolanaTransactionSignature: The transaction signature
         """
-        raw_tx_sig = await self.rpc_client.send_transaction(signed_tx, opts=TxOpts())
-        tx_sig = SolanaTransactionSignature.from_raw(raw_tx_sig)
+        raw_tx_sig: Any = await self.rpc_client.send_transaction(
+            signed_tx, opts=TxOpts()
+        )
+        tx_sig = cast(
+            SolanaTransactionSignature, SolanaTransactionSignature.from_raw(raw_tx_sig)
+        )
         return tx_sig
 
     async def send_transaction(

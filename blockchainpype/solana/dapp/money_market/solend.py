@@ -4,7 +4,7 @@ Provides integration with Solend's lending program.
 """
 
 from decimal import Decimal
-from typing import cast
+from typing import Any, cast
 
 from financepype.assets.blockchain import BlockchainAsset
 from solders.instruction import AccountMeta
@@ -20,6 +20,7 @@ from blockchainpype.dapps.money_market import (
     UserAccountData,
 )
 from blockchainpype.solana.asset import SolanaAsset
+from blockchainpype.solana.blockchain.blockchain import SolanaBlockchainType
 from blockchainpype.solana.blockchain.identifier import SolanaAddress
 from blockchainpype.solana.dapp.idl import SolanaLocalFileIDL
 from blockchainpype.solana.dapp.program import SolanaProgram, SolanaProgramConfiguration
@@ -31,7 +32,7 @@ from .money_market import SolanaMoneyMarket, SolanaMoneyMarketConfiguration
 class SolendConfiguration(SolanaMoneyMarketConfiguration):
     """Configuration for Solend protocol."""
 
-    def __init__(self, **data):
+    def __init__(self, **data: Any) -> None:
         super().__init__(**data)
         # Ensure we have Solend-specific protocol configuration
         if not any(p.protocol_name.lower() == "solend" for p in self.protocols):
@@ -43,15 +44,13 @@ class SolendConfiguration(SolanaMoneyMarketConfiguration):
 class SolendProgram(SolanaProgram):
     """Solend program interface."""
 
-    def __init__(self, address: SolanaAddress, platform=None):
+    def __init__(self, address: SolanaAddress, platform: Any = None) -> None:
         from financepype.operators.blockchains.models import BlockchainPlatform
-
-        from blockchainpype.initializer import SupportedBlockchainType
 
         if platform is None:
             platform = BlockchainPlatform(
                 identifier="solana",
-                type=SupportedBlockchainType.SOLANA.value,
+                type=SolanaBlockchainType,
                 chain_id=None,
             )
 
@@ -67,8 +66,11 @@ class Solend(ProtocolImplementation):
     """Solend protocol implementation."""
 
     def __init__(
-        self, protocol_config: ProtocolConfiguration, blockchain, platform=None
-    ):
+        self,
+        protocol_config: ProtocolConfiguration,
+        blockchain: Any,
+        platform: Any = None,
+    ) -> None:
         self.protocol_config = protocol_config
         self.blockchain = blockchain
 
@@ -79,8 +81,6 @@ class Solend(ProtocolImplementation):
 
     async def get_market_data(self, asset: BlockchainAsset) -> MarketData:
         """Get market data for a specific asset from Solend."""
-        solana_asset = cast(SolanaAsset, asset)
-
         # Initialize program if needed
         if not self.program.is_initialized:
             await self.program.initialize()
@@ -178,11 +178,9 @@ class Solend(ProtocolImplementation):
         from financepype.operators.blockchains.models import BlockchainPlatform
         from financepype.owners.owner import OwnerIdentifier
 
-        from blockchainpype.initializer import SupportedBlockchainType
-
         test_platform = BlockchainPlatform(
             identifier="solana",
-            type=SupportedBlockchainType.SOLANA.value,
+            type=SolanaBlockchainType,
             chain_id=None,
         )
 
@@ -229,11 +227,9 @@ class Solend(ProtocolImplementation):
         from financepype.operators.blockchains.models import BlockchainPlatform
         from financepype.owners.owner import OwnerIdentifier
 
-        from blockchainpype.initializer import SupportedBlockchainType
-
         test_platform = BlockchainPlatform(
             identifier="solana",
-            type=SupportedBlockchainType.SOLANA.value,
+            type=SolanaBlockchainType,
             chain_id=None,
         )
 
@@ -281,11 +277,9 @@ class Solend(ProtocolImplementation):
         from financepype.operators.blockchains.models import BlockchainPlatform
         from financepype.owners.owner import OwnerIdentifier
 
-        from blockchainpype.initializer import SupportedBlockchainType
-
         test_platform = BlockchainPlatform(
             identifier="solana",
-            type=SupportedBlockchainType.SOLANA.value,
+            type=SolanaBlockchainType,
             chain_id=None,
         )
 
@@ -337,11 +331,9 @@ class Solend(ProtocolImplementation):
         from financepype.operators.blockchains.models import BlockchainPlatform
         from financepype.owners.owner import OwnerIdentifier
 
-        from blockchainpype.initializer import SupportedBlockchainType
-
         test_platform = BlockchainPlatform(
             identifier="solana",
-            type=SupportedBlockchainType.SOLANA.value,
+            type=SolanaBlockchainType,
             chain_id=None,
         )
 
@@ -388,11 +380,9 @@ class Solend(ProtocolImplementation):
         from financepype.operators.blockchains.models import BlockchainPlatform
         from financepype.owners.owner import OwnerIdentifier
 
-        from blockchainpype.initializer import SupportedBlockchainType
-
         test_platform = BlockchainPlatform(
             identifier="solana",
-            type=SupportedBlockchainType.SOLANA.value,
+            type=SolanaBlockchainType,
             chain_id=None,
         )
 
@@ -443,11 +433,9 @@ class Solend(ProtocolImplementation):
         from financepype.operators.blockchains.models import BlockchainPlatform
         from financepype.owners.owner import OwnerIdentifier
 
-        from blockchainpype.initializer import SupportedBlockchainType
-
         test_platform = BlockchainPlatform(
             identifier="solana",
-            type=SupportedBlockchainType.SOLANA.value,
+            type=SolanaBlockchainType,
             chain_id=None,
         )
 

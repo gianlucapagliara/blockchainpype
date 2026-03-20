@@ -141,7 +141,7 @@ class EthereumBlockchain(Blockchain):
         """
         block_data = await self.fetch_block_data(block_number)
         if "timestamp" not in block_data:
-            raise ValueError(f"Block {block_number} does not have a timestamp")
+            raise ValueError(f"Block {block_number!r} does not have a timestamp")
 
         return block_data["timestamp"]
 
@@ -175,7 +175,7 @@ class EthereumBlockchain(Blockchain):
         raw_balance = await self.web3.eth.get_balance(
             address.raw, block_identifier=block_number
         )
-        return self.native_asset.convert_to_decimals(raw_balance)
+        return Decimal(self.native_asset.convert_to_decimals(raw_balance))
 
     # === Transactions ===
 
@@ -194,7 +194,9 @@ class EthereumBlockchain(Blockchain):
         raw_tx_hash = await self.web3.eth.send_raw_transaction(
             signed_tx.raw_transaction
         )
-        tx_hash = EthereumTransactionHash.from_raw(raw_tx_hash)
+        tx_hash = cast(
+            EthereumTransactionHash, EthereumTransactionHash.from_raw(raw_tx_hash)
+        )
         return tx_hash
 
     async def send_transaction(

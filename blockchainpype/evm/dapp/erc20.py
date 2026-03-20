@@ -5,6 +5,7 @@ and balance queries, with proper decimal handling and type safety.
 """
 
 from decimal import Decimal
+from typing import cast
 
 from pydantic import ConfigDict, Field
 
@@ -49,19 +50,19 @@ class ERC20Contract(EthereumSmartContract):
         """
         Get the name of the token.
         """
-        return await self.functions.name().call()
+        return cast(str, await self.functions.name().call())
 
     async def get_symbol(self) -> str:
         """
         Get the symbol of the token.
         """
-        return await self.functions.symbol().call()
+        return cast(str, await self.functions.symbol().call())
 
     async def get_decimals(self) -> int:
         """
         Get the number of decimals of the token.
         """
-        return await self.functions.decimals().call()
+        return cast(int, await self.functions.decimals().call())
 
     async def get_total_supply(self) -> Decimal:
         """

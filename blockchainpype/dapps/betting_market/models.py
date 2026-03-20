@@ -1,6 +1,6 @@
 from datetime import datetime
 from decimal import Decimal
-from enum import Enum
+from enum import StrEnum
 from typing import Any, Self
 
 from financepype.operators.dapps.dapp import DecentralizedApplicationConfiguration
@@ -14,7 +14,7 @@ class BlockchainAsset:
     pass
 
 
-class MarketStatus(str, Enum):
+class MarketStatus(StrEnum):
     """Status of a betting market."""
 
     ACTIVE = "active"
@@ -23,7 +23,7 @@ class MarketStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
-class BettingMarketAction(str, Enum):
+class BettingMarketAction(StrEnum):
     """Available actions in betting market protocols."""
 
     BUY = "buy"
@@ -83,7 +83,7 @@ class MarketOutcome(BaseModel):
     @property
     def total_probability(self) -> Decimal:
         """Calculate total probability across all outcome tokens."""
-        return sum(token.probability for token in self.outcome_tokens)
+        return sum((token.probability for token in self.outcome_tokens), Decimal("0"))
 
 
 class BettingMarket(BaseModel):

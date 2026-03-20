@@ -41,7 +41,7 @@ class BlockchainConfigurations:
         return EthereumBlockchainConfiguration(
             platform=BlockchainPlatform(
                 identifier="ethereum",
-                type=SupportedBlockchainType.EVM.value,
+                type=EthereumBlockchainType,
                 chain_id=1,
             ),
             native_asset=EthereumNativeAssetConfiguration(),
@@ -61,7 +61,7 @@ class BlockchainConfigurations:
         return EthereumBlockchainConfiguration(
             platform=BlockchainPlatform(
                 identifier="hardhat",
-                type=SupportedBlockchainType.EVM.value,
+                type=EthereumBlockchainType,
                 local=True,
                 testnet=True,
                 chain_id=None,
@@ -79,7 +79,7 @@ class BlockchainConfigurations:
         return SolanaBlockchainConfiguration(
             platform=BlockchainPlatform(
                 identifier="solana",
-                type=SupportedBlockchainType.SOLANA.value,
+                type=SolanaBlockchainType,
                 chain_id=None,
             ),
             connectivity=SolanaConnectivityConfiguration(
@@ -109,10 +109,10 @@ class BlockchainsInitializer:
     def register_blockchain_classes(cls) -> None:
         """Register blockchain classes for different blockchain types."""
         BlockchainFactory.register_blockchain_class_for_type(
-            EthereumBlockchain, SupportedBlockchainType.EVM.value
+            EthereumBlockchain, EthereumBlockchainType
         )
         BlockchainFactory.register_blockchain_class_for_type(
-            SolanaBlockchain, SupportedBlockchainType.SOLANA.value
+            SolanaBlockchain, SolanaBlockchainType
         )
 
     @classmethod

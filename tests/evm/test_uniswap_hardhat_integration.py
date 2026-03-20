@@ -6,6 +6,7 @@ including transaction creation, signing, and execution.
 """
 
 from decimal import Decimal
+from unittest.mock import MagicMock
 
 import pytest
 

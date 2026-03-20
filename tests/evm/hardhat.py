@@ -106,10 +106,10 @@ class HardhatNode:
                     "   If you encounter issues, consider using a Node.js version manager like nvm."
                 )
 
-        except subprocess.TimeoutExpired:
-            raise RuntimeError("Node.js check timed out")
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError("Node.js check timed out") from e
         except Exception as e:
-            raise RuntimeError(f"Failed to check Node.js version: {e}")
+            raise RuntimeError(f"Failed to check Node.js version: {e}") from e
 
     async def _is_port_in_use(self, port: int) -> bool:
         """Check if a port is already in use."""
@@ -125,9 +125,57 @@ class HardhatNode:
                     ["netstat", "-an"], capture_output=True, text=True, timeout=5
                 )
                 return f":{port}" in result.stdout
-            except:
+            except Exception:
                 # If both methods fail, assume port is available
                 return False
+
+    def _check_process_alive(self) -> None:
+        """Check if the Hardhat process is still running, raise if terminated."""
+        if self.process and self.process.poll() is not None:
+            stdout, stderr = self.process.communicate()
+            raise RuntimeError(
+                f"Hardhat node process terminated unexpectedly.\nSTDOUT: {stdout}\nSTDERR: {stderr}"
+            )
+
+    async def _probe_node(self) -> bool:
+        """Probe the node with a JSON-RPC request. Returns True if node is ready."""
+        result = await asyncio.create_subprocess_exec(
+            "curl",
+            "-s",
+            "-f",
+            "-X",
+            "POST",
+            "-H",
+            "Content-Type: application/json",
+            "--data",
+            '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}',
+            f"http://127.0.0.1:{self.port}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await result.communicate()
+        if result.returncode == 0:
+            response_text = stdout.decode()
+            return "result" in response_text or "error" in response_text
+        return False
+
+    def _build_timeout_error_msg(
+        self, timeout: int, last_error: Exception | None
+    ) -> str:
+        """Build an error message for node startup timeout."""
+        error_msg = f"Hardhat node failed to start within {timeout} seconds"
+        if last_error:
+            error_msg += f"\nLast error: {last_error}"
+        if self.process:
+            try:
+                stdout, stderr = self.process.communicate(timeout=1)
+                if stderr:
+                    error_msg += f"\nProcess stderr: {stderr}"
+                if stdout:
+                    error_msg += f"\nProcess stdout: {stdout}"
+            except Exception:
+                pass
+        return error_msg
 
     async def _wait_for_node_ready(self, timeout: int) -> None:
         """Wait for the Hardhat node to be ready."""
@@ -136,60 +184,16 @@ class HardhatNode:
 
         while time.time() - start_time < timeout:
             try:
-                # Check if process is still running
-                if self.process and self.process.poll() is not None:
-                    # Process has terminated, get the error
-                    stdout, stderr = self.process.communicate()
-                    raise RuntimeError(
-                        f"Hardhat node process terminated unexpectedly.\nSTDOUT: {stdout}\nSTDERR: {stderr}"
-                    )
-
-                # Try to connect to the node using a simple HTTP request
-                result = await asyncio.create_subprocess_exec(
-                    "curl",
-                    "-s",
-                    "-f",
-                    "-X",
-                    "POST",
-                    "-H",
-                    "Content-Type: application/json",
-                    "--data",
-                    '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}',
-                    f"http://127.0.0.1:{self.port}",
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                stdout, stderr = await result.communicate()
-
-                if result.returncode == 0:
-                    # Check if we got a valid JSON-RPC response
-                    response_text = stdout.decode()
-                    if "result" in response_text or "error" in response_text:
-                        print(f"✅ Hardhat node is ready on port {self.port}")
-                        return
-
+                self._check_process_alive()
+                if await self._probe_node():
+                    print(f"✅ Hardhat node is ready on port {self.port}")
+                    return
             except Exception as e:
                 last_error = e
 
             await asyncio.sleep(1)
 
-        # If we get here, the node failed to start
-        error_msg = f"Hardhat node failed to start within {timeout} seconds"
-        if last_error:
-            error_msg += f"\nLast error: {last_error}"
-
-        # Try to get process output for debugging
-        if self.process:
-            try:
-                stdout, stderr = self.process.communicate(timeout=1)
-                if stderr:
-                    error_msg += f"\nProcess stderr: {stderr}"
-                if stdout:
-                    error_msg += f"\nProcess stdout: {stdout}"
-            except:
-                pass
-
-        raise RuntimeError(error_msg)
+        raise RuntimeError(self._build_timeout_error_msg(timeout, last_error))
 
     async def stop(self) -> None:
         """Stop the Hardhat node."""
@@ -347,7 +351,7 @@ class HardhatTestEnvironment:
                 hash_hex = "0x" + hash_hex
             return hash_hex
         except Exception as e:
-            raise RuntimeError(f"Failed to send ETH: {e}")
+            raise RuntimeError(f"Failed to send ETH: {e}") from e
 
     async def mine_blocks(self, count: int = 1) -> None:
         """Mine blocks on the local network."""

@@ -9,6 +9,7 @@ from blockchainpype.dapps.router.dex import (
     DecentralizedExchange,
     DexConfiguration,
     ProtocolConfiguration,
+    ProtocolImplementation,
 )
 from blockchainpype.dapps.router.models import SwapMode, SwapRoute
 from blockchainpype.evm.blockchain.blockchain import (
@@ -110,6 +111,7 @@ class UniswapDEX(DecentralizedExchange):
     def _initialize_protocols(self) -> None:
         """Initialize Uniswap protocol strategies."""
         for protocol_config in self.configuration.protocols:
+            strategy: ProtocolImplementation
             if protocol_config.protocol_name == "uniswap_v2":
                 strategy = UniswapV2(
                     blockchain=self.blockchain,

@@ -21,6 +21,7 @@ from blockchainpype.dapps.money_market import (
     InterestRateMode,
     ProtocolConfiguration,
 )
+from blockchainpype.dapps.money_market.models import BlockchainAsset
 from blockchainpype.initializer import BlockchainsInitializer, SupportedBlockchainType
 from blockchainpype.solana.asset import SolanaAssetData
 from blockchainpype.solana.blockchain.identifier import SolanaAddress
@@ -55,9 +56,6 @@ def test_platform():
         type=SupportedBlockchainType.SOLANA.value,
         chain_id=None,
     )
-
-
-from blockchainpype.dapps.money_market.models import BlockchainAsset
 
 
 class MockSolanaAsset(BlockchainAsset):

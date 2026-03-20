@@ -21,7 +21,10 @@ from blockchainpype.dapps.betting_market import (
     ProtocolImplementation,
 )
 from blockchainpype.dapps.betting_market.betting_market import BettingMarket
-from blockchainpype.evm.blockchain.blockchain import EthereumBlockchain
+from blockchainpype.evm.blockchain.blockchain import (
+    EthereumBlockchain,
+    EthereumBlockchainType,
+)
 from blockchainpype.evm.blockchain.identifier import EthereumAddress
 from blockchainpype.evm.transaction import EthereumTransaction
 
@@ -42,7 +45,7 @@ class PolymarketConfiguration(ProtocolConfiguration):
     neg_risk_ctf_exchange_address: str = "0xC5d563A36AE78145C45a50134d48A1215220f80a"
     neg_risk_adapter_address: str = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"
 
-    def __init__(self, **data):
+    def __init__(self, **data: Any) -> None:
         if "protocol_name" not in data:
             data["protocol_name"] = "Polymarket"
         if "contract_address" not in data:
@@ -84,9 +87,10 @@ class Polymarket(ProtocolImplementation):
         try:
             async with session.get(url, params=params) as response:
                 response.raise_for_status()
-                return await response.json()
+                result: dict[str, Any] = await response.json()
+                return result
         except aiohttp.ClientError as e:
-            raise ValueError(f"API request failed: {e}")
+            raise ValueError(f"API request failed: {e}") from e
 
     async def get_market(self, market_id: str) -> BettingMarketModel:
         """Get detailed information about a specific market."""
@@ -103,7 +107,7 @@ class Polymarket(ProtocolImplementation):
         offset: int = 0,
     ) -> list[BettingMarketModel]:
         """Get list of available markets with optional filtering."""
-        params = {
+        params: dict[str, Any] = {
             "limit": limit,
             "offset": offset,
         }
@@ -171,11 +175,10 @@ class Polymarket(ProtocolImplementation):
         from financepype.operators.blockchains.models import BlockchainPlatform
 
         from blockchainpype.evm.wallet.identifier import EthereumWalletIdentifier
-        from blockchainpype.initializer import SupportedBlockchainType
 
         platform = BlockchainPlatform(
             identifier="ethereum",
-            type=SupportedBlockchainType.EVM.value,
+            type=EthereumBlockchainType,
             chain_id=1,
         )
 
@@ -206,11 +209,10 @@ class Polymarket(ProtocolImplementation):
         from financepype.operators.blockchains.models import BlockchainPlatform
 
         from blockchainpype.evm.wallet.identifier import EthereumWalletIdentifier
-        from blockchainpype.initializer import SupportedBlockchainType
 
         platform = BlockchainPlatform(
             identifier="ethereum",
-            type=SupportedBlockchainType.EVM.value,
+            type=EthereumBlockchainType,
             chain_id=1,
         )
 
@@ -238,11 +240,10 @@ class Polymarket(ProtocolImplementation):
         from financepype.operators.blockchains.models import BlockchainPlatform
 
         from blockchainpype.evm.wallet.identifier import EthereumWalletIdentifier
-        from blockchainpype.initializer import SupportedBlockchainType
 
         platform = BlockchainPlatform(
             identifier="ethereum",
-            type=SupportedBlockchainType.EVM.value,
+            type=EthereumBlockchainType,
             chain_id=1,
         )
 
@@ -327,7 +328,7 @@ class Polymarket(ProtocolImplementation):
         from blockchainpype.dapps.betting_market.models import BlockchainAsset
 
         class USDCAsset(BlockchainAsset):
-            def __init__(self):
+            def __init__(self) -> None:
                 super().__init__()
                 self.symbol = "USDC"
                 self.decimals = 6
@@ -387,7 +388,7 @@ class Polymarket(ProtocolImplementation):
             protocol="Polymarket",
         )
 
-    async def close(self):
+    async def close(self) -> None:
         """Close HTTP session."""
         if self._session:
             await self._session.close()

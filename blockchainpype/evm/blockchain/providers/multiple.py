@@ -90,7 +90,11 @@ class MultipleHTTPProvider(AsyncJSONBaseProvider):
                 exception = e
 
                 # Get the next provider
-                if provider.endpoint_uri in str(e):
+                if provider.endpoint_uri is not None and str(
+                    provider.endpoint_uri
+                ) in str(e):
                     self.get_next_provider(method)
 
+        if response is None:
+            raise RuntimeError("No response received from any provider")
         return response

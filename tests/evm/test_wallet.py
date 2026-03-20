@@ -55,7 +55,7 @@ def test_account() -> LocalAccount:
 
 
 @pytest.fixture
-def ethereum_wallet(
+async def ethereum_wallet(
     ethereum_config: EthereumBlockchainConfiguration,
     test_account: LocalAccount,
     ethereum_blockchain: EthereumBlockchain,

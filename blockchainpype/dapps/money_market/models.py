@@ -1,5 +1,5 @@
 from decimal import Decimal
-from enum import Enum
+from enum import StrEnum
 from typing import Self
 
 from financepype.operators.dapps.dapp import DecentralizedApplicationConfiguration
@@ -13,21 +13,21 @@ class BlockchainAsset:
     pass
 
 
-class InterestRateMode(str, Enum):
+class InterestRateMode(StrEnum):
     """Interest rate mode for borrowing positions."""
 
     STABLE = "stable"
     VARIABLE = "variable"
 
 
-class CollateralMode(str, Enum):
+class CollateralMode(StrEnum):
     """Collateral usage mode for assets."""
 
     ENABLED = "enabled"
     DISABLED = "disabled"
 
 
-class MoneyMarketAction(str, Enum):
+class MoneyMarketAction(StrEnum):
     """Available actions in money market protocols."""
 
     SUPPLY = "supply"

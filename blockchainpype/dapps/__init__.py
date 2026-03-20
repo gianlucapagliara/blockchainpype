@@ -3,6 +3,8 @@ This package provides interfaces for interacting with decentralized applications
 It includes router abstractions for DEXes and money market protocols.
 """
 
+from typing import Any
+
 from .money_market import (
     BorrowingPosition,
     CollateralMode,
@@ -18,6 +20,18 @@ from .money_market import ProtocolConfiguration as MoneyMarketProtocolConfigurat
 from .money_market import ProtocolImplementation as MoneyMarketProtocolImplementation
 
 # Betting Market imports
+_betting_market_available = False
+BettingMarketDApp: Any = None
+BettingMarketModel: Any = None
+BettingMarketAction: Any = None
+BettingMarketConfiguration: Any = None
+BettingPosition: Any = None
+MarketOutcome: Any = None
+MarketStatus: Any = None
+OutcomeToken: Any = None
+BettingMarketProtocolConfiguration: Any = None
+BettingMarketProtocolImplementation: Any = None
+
 try:
     from .betting_market import (
         BettingMarketAction,
@@ -38,27 +52,19 @@ try:
 
     _betting_market_available = True
 except ImportError:
-    BettingMarketDApp = None
-    BettingMarketModel = None
-    BettingMarketAction = None
-    BettingMarketConfiguration = None
-    BettingPosition = None
-    MarketOutcome = None
-    MarketStatus = None
-    OutcomeToken = None
-    BettingMarketProtocolConfiguration = None
-    BettingMarketProtocolImplementation = None
-    _betting_market_available = False
+    pass
 
 # Router imports (optional, may not be available in all setups)
+_router_available = False
+SwapMode: Any = None
+SwapRoute: Any = None
+
 try:
-    from .router import SwapMode, SwapRoute
+    from .router.models import SwapMode, SwapRoute
 
     _router_available = True
 except ImportError:
-    SwapMode = None
-    SwapRoute = None
-    _router_available = False
+    pass
 
 # Base exports
 __all__ = [

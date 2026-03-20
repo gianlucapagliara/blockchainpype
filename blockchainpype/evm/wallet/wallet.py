@@ -162,7 +162,7 @@ class EthereumWallet(BlockchainWallet):
     # === Transactions ===
 
     def sign_transaction(
-        self, tx_data: dict, auto_assign_nonce: bool = True
+        self, tx_data: dict[str, Any], auto_assign_nonce: bool = True
     ) -> SignedTransaction:
         """
         Sign a transaction with the wallet's private key.
@@ -195,7 +195,7 @@ class EthereumWallet(BlockchainWallet):
     def sign_and_send_transaction(
         self,
         client_operation_id: str,
-        tx_data: dict,
+        tx_data: dict[str, Any],
         auto_assign_nonce: bool = True,
         transaction_class: Any | None = None,
         additional_kwargs: dict[str, Any] | None = None,
@@ -313,7 +313,7 @@ class EthereumWallet(BlockchainWallet):
     async def modify_transaction(
         self,
         tx_hash: EthereumTransactionHash,
-        tx_data_to_modify: dict | None = None,
+        tx_data_to_modify: dict[str, Any] | None = None,
         gas_increase_percentage: float = 0.12,
         transaction_class: Any | None = None,
         client_operation_id: str | None = None,

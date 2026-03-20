@@ -530,7 +530,6 @@ class TestRealWorldScenarios:
         self, realistic_money_market, usdc_asset, weth_asset
     ):
         """Test liquidation scenario."""
-        liquidator_address = "0x9876543210987654321098765432109876543210"
         user_to_liquidate = "0x1111111111111111111111111111111111111111"
 
         # Mock liquidation transaction

@@ -539,9 +539,7 @@ class TestUniswapV2Strategy:
         )
 
         # Test creating swap transaction without operation ID
-        result = await v2_strategy.create_swap_transaction(
-            route=mock_route, wallet=mock_wallet
-        )
+        await v2_strategy.create_swap_transaction(route=mock_route, wallet=mock_wallet)
 
         # Verify that sign_and_send_transaction was called with an auto-generated ID
         call_args = mock_wallet.sign_and_send_transaction.call_args
@@ -914,9 +912,7 @@ class TestUniswapV3Strategy:
         )
 
         # Test creating swap transaction without operation ID
-        result = await v3_strategy.create_swap_transaction(
-            route=mock_route, wallet=mock_wallet
-        )
+        await v3_strategy.create_swap_transaction(route=mock_route, wallet=mock_wallet)
 
         # Verify that sign_and_send_transaction was called with an auto-generated ID
         call_args = mock_wallet.sign_and_send_transaction.call_args

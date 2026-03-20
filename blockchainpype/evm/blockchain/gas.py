@@ -7,6 +7,7 @@ retry mechanisms for reliable gas estimation.
 import math
 from enum import Enum
 from functools import reduce
+from typing import Any
 
 from pydantic import BaseModel, Field
 from web3 import AsyncWeb3
@@ -77,7 +78,7 @@ class GasConfiguration(BaseModel):
 
     async def get_gas(
         self,
-        w3: AsyncWeb3,
+        w3: AsyncWeb3[Any],
         transaction_params: TxParams | None = None,
         gas_strategy: GasStrategy = GasStrategy.EIP1559,
     ) -> dict[str, int]:
@@ -85,7 +86,7 @@ class GasConfiguration(BaseModel):
         Get gas fee estimates based on the specified strategy.
 
         Args:
-            w3 (AsyncWeb3): Web3 instance for blockchain interaction
+            w3 (AsyncWeb3[Any]): Web3 instance for blockchain interaction
             transaction_params (TxParams | None): Optional transaction parameters
             gas_strategy (GasStrategy): Gas calculation strategy to use
 
@@ -99,7 +100,7 @@ class GasConfiguration(BaseModel):
 
     async def estimate_eip1559_gas_fees(
         self,
-        w3: AsyncWeb3,
+        w3: AsyncWeb3[Any],
         transaction_params: TxParams | None = None,
         n_max_retries: int = 3,
     ) -> dict[str, int]:
@@ -118,7 +119,7 @@ class GasConfiguration(BaseModel):
         4. Combines fees with safety margins
 
         Args:
-            w3 (AsyncWeb3): Web3 instance for blockchain interaction
+            w3 (AsyncWeb3[Any]): Web3 instance for blockchain interaction
             transaction_params (TxParams | None): Optional transaction parameters
             n_max_retries (int): Maximum number of retry attempts
 
@@ -141,7 +142,7 @@ class GasConfiguration(BaseModel):
                     gas = self.default_gas
                 else:
                     if "gas" in transaction_params:
-                        gas = transaction_params["gas"]
+                        gas = int(transaction_params["gas"])
                     else:
                         gas = int(await w3.eth.estimate_gas(transaction_params))
 
@@ -177,7 +178,7 @@ class GasConfiguration(BaseModel):
 
     async def estimate_legacy_gas_fees(
         self,
-        w3: AsyncWeb3,
+        w3: AsyncWeb3[Any],
         transaction_params: TxParams | None = None,
     ) -> dict[str, int]:
         """
@@ -187,7 +188,7 @@ class GasConfiguration(BaseModel):
         gas price is used. The price is adjusted based on the selected speed mode.
 
         Args:
-            w3 (AsyncWeb3): Web3 instance for blockchain interaction
+            w3 (AsyncWeb3[Any]): Web3 instance for blockchain interaction
             transaction_params (TxParams | None): Optional transaction parameters
 
         Returns:
@@ -200,14 +201,14 @@ class GasConfiguration(BaseModel):
         if gas_price_multiplier is None:
             raise ValueError("Invalid speed")
 
-        gas_price = await w3.eth.gas_price
+        gas_price = int(await w3.eth.gas_price)
         if transaction_params is None:
             gas = self.default_gas
         else:
             if "gas" in transaction_params:
-                gas = transaction_params["gas"]
+                gas = int(transaction_params["gas"])
             else:
-                gas = await w3.eth.estimate_gas(transaction_params)
+                gas = int(await w3.eth.estimate_gas(transaction_params))
 
         return {
             "gas": int(math.ceil(gas * 1.3)),
@@ -215,7 +216,7 @@ class GasConfiguration(BaseModel):
         }
 
     @staticmethod
-    def max_gas_payable(gas_fees: dict) -> int:
+    def max_gas_payable(gas_fees: dict[str, int]) -> int:
         """
         Calculate the maximum amount of gas payable for a transaction.
 
@@ -229,6 +230,6 @@ class GasConfiguration(BaseModel):
             int: Maximum possible gas cost in wei
         """
         if "gasPrice" in gas_fees:
-            return gas_fees["gas"] * gas_fees["gasPrice"]
+            return int(gas_fees["gas"]) * int(gas_fees["gasPrice"])
         else:
-            return gas_fees["gas"] * gas_fees["maxFeePerGas"]
+            return int(gas_fees["gas"]) * int(gas_fees["maxFeePerGas"])

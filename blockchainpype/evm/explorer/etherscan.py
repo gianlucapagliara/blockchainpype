@@ -89,7 +89,7 @@ class EtherscanExplorer:
         *,
         session: ClientSession | None = None,
         timeout: aiohttp.ClientTimeout | None = None,
-    ) -> list | dict:
+    ) -> list[Any] | dict[str, Any]:
         """Retrieve a contract ABI from the Etherscan API.
 
         Args:
@@ -150,7 +150,7 @@ class EtherscanExplorer:
         self,
         checksum_address: str,
         session: ClientSession,
-    ) -> tuple[str, list | dict | None]:
+    ) -> tuple[str, list[Any] | dict[str, Any] | None]:
         try:
             metadata = await self._fetch_contract_metadata(
                 checksum_address, session=session
@@ -227,7 +227,7 @@ class EtherscanExplorer:
         return EthereumAddress.id_to_string(checksum)
 
     @staticmethod
-    def _decode_abi_payload(payload: Any) -> list | dict:
+    def _decode_abi_payload(payload: Any) -> list[Any] | dict[str, Any]:
         if not isinstance(payload, dict):
             raise ValueError("Unexpected response format returned by Etherscan")
 
@@ -246,19 +246,19 @@ class EtherscanExplorer:
         except json.JSONDecodeError as exc:
             raise ValueError("Etherscan returned malformed ABI JSON") from exc
 
-        if not isinstance(abi, list | dict):
+        if not isinstance(abi, (list, dict)):
             raise ValueError("Etherscan ABI must decode to a list or dict")
 
         return abi
 
     @staticmethod
-    def _decode_abi_json_string(raw_abi: str) -> list | dict:
+    def _decode_abi_json_string(raw_abi: str) -> list[Any] | dict[str, Any]:
         try:
             abi = json.loads(raw_abi)
         except json.JSONDecodeError as exc:  # pragma: no cover - defensive
             raise ValueError("Etherscan inline ABI JSON is malformed") from exc
 
-        if not isinstance(abi, list | dict):
+        if not isinstance(abi, (list, dict)):
             raise ValueError("Etherscan inline ABI must decode to a list or dict")
 
         return abi

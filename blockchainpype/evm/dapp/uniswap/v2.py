@@ -58,7 +58,7 @@ class UniswapV2(ProtocolImplementation):
             )
         )
 
-    async def _ensure_contracts_initialized(self):
+    async def _ensure_contracts_initialized(self) -> None:
         """Ensure factory and router contracts are initialized."""
         if not self.factory_contract.is_initialized:
             await self.factory_contract.initialize()
@@ -204,7 +204,7 @@ class UniswapV2(ProtocolImplementation):
                 Decimal(reserve0) / (10**asset_b.data.decimals),
             )
 
-    async def build_swap_transaction(
+    async def build_swap_transaction(  # type: ignore[override]
         self,
         route: SwapRoute,
         wallet: EthereumWallet,
@@ -353,9 +353,10 @@ class UniswapV2(ProtocolImplementation):
     async def _get_pair(self, asset_a: EthereumAsset, asset_b: EthereumAsset) -> str:
         """Get the pair address for two assets."""
         await self._ensure_contracts_initialized()
-        return await self.factory_contract.functions.getPair(
+        result: str = await self.factory_contract.functions.getPair(
             asset_a.address.raw, asset_b.address.raw
         ).call()
+        return result
 
     async def _get_amount_out(
         self, amount_in: int, reserve_in: Decimal, reserve_out: Decimal

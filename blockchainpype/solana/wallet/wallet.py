@@ -145,7 +145,7 @@ class SolanaWallet(BlockchainWallet):
         else:
             # Change recent_blockhash
             new_message = Message.new_with_blockhash(
-                transaction.message.instructions,
+                transaction.message.instructions,  # type: ignore[arg-type]
                 transaction.message.account_keys[0],
                 recent_blockhash,
             )

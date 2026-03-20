@@ -1,12 +1,12 @@
 from decimal import Decimal
-from enum import Enum
+from enum import Enum, StrEnum
 from typing import Self
 
 from financepype.assets.blockchain import BlockchainAsset
 from pydantic import BaseModel, model_validator
 
 
-class SwapMode(str, Enum):
+class SwapMode(StrEnum):
     EXACT_INPUT = "exact_input"
     EXACT_OUTPUT = "exact_output"
     UNDEFINED = "undefined"

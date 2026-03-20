@@ -22,7 +22,7 @@ class SolanaIDL(BaseModel):
     """
 
     @abstractmethod
-    async def get_idl(self) -> dict:
+    async def get_idl(self) -> dict[str, object]:
         """
         Retrieve the program IDL.
 
@@ -46,9 +46,9 @@ class SolanaDictIDL(SolanaIDL):
         idl (dict): The program IDL stored as a dictionary
     """
 
-    idl: dict
+    idl: dict[str, object]
 
-    async def get_idl(self) -> dict:
+    async def get_idl(self) -> dict[str, object]:
         """
         Retrieve the program IDL from the stored dictionary.
 
@@ -83,7 +83,7 @@ class SolanaLocalFileIDL(SolanaIDL):
         """
         return os.path.join(self.folder_path, self.file_name)
 
-    async def get_idl(self) -> dict:
+    async def get_idl(self) -> dict[str, object]:
         """
         Load and retrieve the program IDL from the local file.
 
@@ -95,4 +95,5 @@ class SolanaLocalFileIDL(SolanaIDL):
             json.JSONDecodeError: If the file contains invalid JSON
         """
         with open(self.file_path) as file:
-            return json.load(file)
+            result: dict[str, object] = json.load(file)
+            return result
