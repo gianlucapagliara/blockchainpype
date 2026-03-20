@@ -54,7 +54,7 @@ echo "Running checks..."
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy --strict blockchainpype/
-uv run pytest tests/ -x -q
+uv run pytest tests/ -x -q --ignore=tests/evm/test_hardhat.py --ignore=tests/evm/test_uniswap_hardhat_integration.py -m "not network"
 
 git add "$PYPROJECT" uv.lock
 git commit -m "chore: bump version to ${NEW_VERSION}"
