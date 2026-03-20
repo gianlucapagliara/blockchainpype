@@ -115,6 +115,7 @@ async def test_wallet_nonce_management(ethereum_wallet: EthereumWallet) -> None:
     assert ethereum_wallet.last_nonce == initial_nonce + 1
 
 
+@pytest.mark.network
 @pytest.mark.asyncio
 async def test_wallet_balance(ethereum_wallet: EthereumWallet) -> None:
     """Test fetching wallet balance."""

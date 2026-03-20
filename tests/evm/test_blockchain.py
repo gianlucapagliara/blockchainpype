@@ -56,6 +56,7 @@ async def test_blockchain_initialization(
     assert ethereum_blockchain.explorer is None
 
 
+@pytest.mark.network
 @pytest.mark.asyncio
 async def test_fetch_block_number(ethereum_blockchain: EthereumBlockchain) -> None:
     """Test fetching the current block number."""
@@ -64,6 +65,7 @@ async def test_fetch_block_number(ethereum_blockchain: EthereumBlockchain) -> No
     assert block_number > 0
 
 
+@pytest.mark.network
 @pytest.mark.asyncio
 async def test_fetch_native_asset_balance(
     ethereum_blockchain: EthereumBlockchain,
@@ -77,6 +79,7 @@ async def test_fetch_native_asset_balance(
     assert balance >= 0
 
 
+@pytest.mark.network
 @pytest.mark.asyncio
 async def test_fetch_block_timestamp(ethereum_blockchain: EthereumBlockchain) -> None:
     """Test fetching block timestamp."""

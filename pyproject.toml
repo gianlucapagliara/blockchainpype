@@ -77,3 +77,7 @@ ignore = ["E501"]
 asyncio_mode = "auto"
 timeout = 30
 testpaths = ["tests"]
+markers = [
+    "network: tests that require network access (RPC calls)",
+    "integration: tests that require external services (Hardhat, etc.)",
+]
