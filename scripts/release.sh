@@ -1,7 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BUMP_TYPE="${1:-patch}"
+YES=false
+BUMP_TYPE="patch"
+
+for arg in "$@"; do
+    case "$arg" in
+        -y|--yes) YES=true ;;
+        major|minor|patch) BUMP_TYPE="$arg" ;;
+        *) echo "Error: unknown argument '$arg'"; exit 1 ;;
+    esac
+done
+
 PYPROJECT="pyproject.toml"
 
 if [[ "$BUMP_TYPE" != "major" && "$BUMP_TYPE" != "minor" && "$BUMP_TYPE" != "patch" ]]; then
@@ -40,10 +50,12 @@ esac
 NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
 echo "New version:     $NEW_VERSION"
 
-read -rp "Release v${NEW_VERSION}? [y/N] " CONFIRM
-if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
-    echo "Aborted."
-    exit 0
+if [[ "$YES" != true ]]; then
+    read -rp "Release v${NEW_VERSION}? [y/N] " CONFIRM
+    if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
+        echo "Aborted."
+        exit 0
+    fi
 fi
 
 sed -i '' "s/^version = \"${CURRENT_VERSION}\"/version = \"${NEW_VERSION}\"/" "$PYPROJECT"
