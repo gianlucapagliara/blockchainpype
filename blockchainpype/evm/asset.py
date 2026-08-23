@@ -5,6 +5,7 @@ types of Ethereum assets.
 """
 
 from abc import abstractmethod
+from decimal import Decimal
 
 from financepype.assets.blockchain import BlockchainAsset, BlockchainAssetData
 from pydantic import Field
@@ -35,8 +36,14 @@ class EthereumAsset(BlockchainAsset):
     both native ETH and ERC-20 tokens. It provides the foundation for asset management
     and interaction within the Ethereum ecosystem.
 
+    Unlike the base BlockchainAsset, the data field is optional so asset metadata
+    (name, symbol, decimals) can be fetched lazily from the chain via
+    initialize_data(). This is an abstract class: concrete subclasses (pydantic
+    enforces this at instantiation) must implement initialize_data.
+
     Attributes:
-        data (EthereumAssetData): Asset-specific data including name, symbol, and decimals
+        data (EthereumAssetData | None): Asset-specific data including name,
+            symbol, and decimals; None until initialize_data() has run
     """
 
     identifier: EthereumAddress
@@ -45,13 +52,51 @@ class EthereumAsset(BlockchainAsset):
     @abstractmethod
     async def initialize_data(self) -> None:
         """
-        Initialize the asset data.
+        Initialize the asset data, typically by fetching it from the chain.
         """
         raise NotImplementedError
 
     @property
     def address(self) -> EthereumAddress:
         return self.identifier
+
+    def convert_to_decimals(self, raw_amount: int) -> Decimal:
+        """
+        Convert raw token units to decimal representation.
+
+        Args:
+            raw_amount (int): The raw amount in smallest token units
+
+        Returns:
+            Decimal: The amount converted to decimal representation
+
+        Raises:
+            ValueError: If the asset data has not been initialized yet
+        """
+        if self.data is None:
+            raise ValueError(
+                "Asset data is not initialized; call initialize_data() first"
+            )
+        return Decimal(raw_amount) / Decimal(10**self.data.decimals)
+
+    def convert_to_raw(self, decimal_amount: Decimal) -> int:
+        """
+        Convert decimal amount to raw token units.
+
+        Args:
+            decimal_amount (Decimal): The amount in decimal representation
+
+        Returns:
+            int: The amount converted to raw token units
+
+        Raises:
+            ValueError: If the asset data has not been initialized yet
+        """
+        if self.data is None:
+            raise ValueError(
+                "Asset data is not initialized; call initialize_data() first"
+            )
+        return int(decimal_amount * 10**self.data.decimals)
 
 
 class EthereumNativeAsset(EthereumAsset):

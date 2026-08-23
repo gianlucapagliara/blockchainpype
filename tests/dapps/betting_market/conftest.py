@@ -2,37 +2,18 @@
 Pytest configuration for betting market tests.
 """
 
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 import pytest
-from financepype.operators.blockchains.models import BlockchainPlatform
 
-from blockchainpype.dapps.betting_market import ProtocolConfiguration
-from blockchainpype.evm.dapp.betting_market import PolymarketConfiguration
-from blockchainpype.initializer import SupportedBlockchainType
-
-
-@pytest.fixture
-def test_platform():
-    """Create a test blockchain platform."""
-    return BlockchainPlatform(
-        identifier="ethereum",
-        type=SupportedBlockchainType.EVM.value,
-        chain_id=1,
-    )
-
-
-@pytest.fixture
-def polymarket_protocol():
-    """Polymarket protocol configuration."""
-    return PolymarketConfiguration(
-        protocol_name="Polymarket",
-        contract_address="0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E",
-        api_base_url="https://clob.polymarket.com",
-        conditional_tokens_address="0x4D97DCd97eC945f40cF65F87097ACe5EA0476045",
-        collateral_token_address="0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
-        fee_rate=Decimal("0.02"),
-    )
+from blockchainpype.dapps.betting_market import (
+    BettingMarketModel,
+    MarketOutcome,
+    MarketStatus,
+    OutcomeToken,
+    ProtocolConfiguration,
+)
 
 
 @pytest.fixture
@@ -42,6 +23,69 @@ def generic_betting_protocol():
         protocol_name="Generic Betting Market",
         contract_address="0x1234567890123456789012345678901234567890",
         conditional_tokens_address="0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
-        collateral_token_address="0xfedcbafedcbafedcbafedcbafedcbafedcbafedcba",
+        collateral_token_address="0xfedcbafedcbafedcbafedcbafedcbafedcbafedc",
         fee_rate=Decimal("0.025"),
+    )
+
+
+@pytest.fixture
+def yes_token():
+    """Sample YES outcome token."""
+    return OutcomeToken(
+        token_id="yes_token_1",
+        outcome_name="Yes",
+        current_price=Decimal("0.65"),
+        total_supply=Decimal("10000"),
+        probability=Decimal("0.65"),
+    )
+
+
+@pytest.fixture
+def no_token():
+    """Sample NO outcome token."""
+    return OutcomeToken(
+        token_id="no_token_1",
+        outcome_name="No",
+        current_price=Decimal("0.35"),
+        total_supply=Decimal("5000"),
+        probability=Decimal("0.35"),
+    )
+
+
+@pytest.fixture
+def yes_outcome(yes_token):
+    """Sample YES market outcome."""
+    return MarketOutcome(
+        outcome_id="outcome_yes",
+        outcome_text="Yes",
+        outcome_tokens=[yes_token],
+    )
+
+
+@pytest.fixture
+def no_outcome(no_token):
+    """Sample NO market outcome."""
+    return MarketOutcome(
+        outcome_id="outcome_no",
+        outcome_text="No",
+        outcome_tokens=[no_token],
+    )
+
+
+@pytest.fixture
+def sample_market(usdc_asset, yes_outcome, no_outcome):
+    """Sample betting market backed by a real financepype asset."""
+    return BettingMarketModel(
+        market_id="test_market_1",
+        title="Test Market",
+        description="A test betting market",
+        category="test",
+        status=MarketStatus.ACTIVE,
+        collateral_asset=usdc_asset,
+        outcomes=[yes_outcome, no_outcome],
+        total_volume=Decimal("50000"),
+        total_liquidity=Decimal("25000"),
+        creation_date=datetime(2024, 1, 1, 12, 0, 0),
+        end_date=datetime(2024, 1, 1, 12, 0, 0) + timedelta(days=30),
+        protocol="Test Protocol",
     )

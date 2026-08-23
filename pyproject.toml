@@ -38,6 +38,15 @@ Documentation = "https://gianlucapagliara.github.io/blockchainpype/"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build.targets.wheel]
+packages = ["blockchainpype"]
+
+# Ship the shared ABI/IDL assets inside the package so wheel installs can
+# resolve them (see blockchainpype.resolve_common_path).
+[tool.hatch.build.targets.wheel.force-include]
+"common/abi" = "blockchainpype/common/abi"
+"common/idl" = "blockchainpype/common/idl"
+
 [dependency-groups]
 dev = [
     "pytest>=8.0",
@@ -75,8 +84,15 @@ ignore = ["E501"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Async fixtures run in a function-scoped loop by default (explicit to silence
+# the pytest-asyncio deprecation warning without changing behavior). The
+# hardhat fixtures opt into loop_scope="session" individually.
+asyncio_default_fixture_loop_scope = "function"
 timeout = 30
 testpaths = ["tests"]
+# Default run skips tests needing live RPCs or external services (Hardhat).
+# Run them explicitly with e.g.: pytest -m integration  /  pytest -m ""
+addopts = "-m 'not network and not integration'"
 markers = [
     "network: tests that require network access (RPC calls)",
     "integration: tests that require external services (Hardhat, etc.)",

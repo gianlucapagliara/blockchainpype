@@ -1,17 +1,69 @@
+from abc import ABC, abstractmethod
 from decimal import Decimal
-from typing import Protocol
+from typing import Protocol, cast, runtime_checkable
 
 from financepype.operations.transactions.transaction import BlockchainTransaction
 from financepype.operators.dapps.dapp import DecentralizedApplication
+from financepype.owners.wallet import BlockchainWallet
 
 from .models import BettingMarket as BettingMarketModel
 from .models import BettingMarketConfiguration, BettingPosition
 
-__all__ = ["BettingMarket", "ProtocolImplementation"]
+__all__ = [
+    "MAX_DERIVED_OUTCOME_PRICE",
+    "MIN_DERIVED_OUTCOME_PRICE",
+    "BettingMarket",
+    "ProtocolImplementation",
+]
+
+#: Outcome-token prices are probabilities in the open interval (0, 1): an
+#: order priced at 1.0 (or 0.0) is rejected by the protocols. The facade
+#: therefore clamps the prices it *derives* from a quote plus slippage into
+#: ``[MIN_DERIVED_OUTCOME_PRICE, MAX_DERIVED_OUTCOME_PRICE]``: the extremes
+#: of the default 0.001 price tick, which every protocol here quotes on
+#: unless a market declares a finer one. A market on a coarser tick rounds
+#: the clamped price further when the order is built.
+MAX_DERIVED_OUTCOME_PRICE = Decimal("0.999")
+MIN_DERIVED_OUTCOME_PRICE = Decimal("0.001")
 
 
+@runtime_checkable
 class ProtocolImplementation(Protocol):
-    """Protocol-specific implementation of betting market operations."""
+    """Structural contract for protocol-specific betting market strategies.
+
+    Implementations translate protocol-agnostic market/trading requests into
+    protocol-specific interactions (on-chain calls, or off-chain order-book
+    orders). The :class:`BettingMarket` facade selects a strategy per call and
+    delegates to these methods.
+
+    Contract:
+
+    * Read methods (``get_market``, ``get_markets``, ``get_user_positions``,
+      ``get_outcome_token_price``, ``calculate_*_quote``) MUST work without a
+      wallet.
+    * ``build_*`` methods MUST only build and return an unsigned (never signed
+      nor broadcast) :class:`BlockchainTransaction` and MUST raise
+      ``ValueError`` when a wallet is required but none is bound. Protocols
+      whose trading is off-chain (e.g. Polymarket's CLOB) return a tracking
+      transaction wrapping the signed order instead of chain calldata.
+    * Wallet binding: strategies that need a wallet to build or sign (e.g. EVM
+      implementations that need a sender address/nonce, or an EIP-712 signer)
+      SHOULD accept an optional ``wallet`` keyword argument at construction
+      and MUST implement ``set_wallet`` so the owning facade (or application
+      code) can bind or replace the wallet after construction. Strategies that
+      never need a wallet implement ``set_wallet`` as a no-op.
+    * ``max_price``/``min_price`` arrive already clamped into
+      ``[MIN_DERIVED_OUTCOME_PRICE, MAX_DERIVED_OUTCOME_PRICE]`` when the
+      facade derived them from a quote; explicit caller values are forwarded
+      untouched and may be rejected by the protocol.
+
+    The protocol is runtime-checkable and intentionally contains only method
+    signatures (no behavior).
+    """
+
+    def set_wallet(self, wallet: BlockchainWallet | None) -> None:
+        """Bind (or unbind, with ``None``) the wallet used to build transactions."""
+        ...
 
     async def get_market(
         self,
@@ -95,7 +147,7 @@ class ProtocolImplementation(Protocol):
         ...
 
 
-class BettingMarket(DecentralizedApplication):
+class BettingMarket(DecentralizedApplication, ABC):
     """Base class for betting market protocols like Polymarket."""
 
     def __init__(self, configuration: BettingMarketConfiguration):
@@ -104,13 +156,21 @@ class BettingMarket(DecentralizedApplication):
         self._protocol_strategies: dict[str, ProtocolImplementation] = {}
         self._initialize_protocols()
 
+    @abstractmethod
     def _initialize_protocols(self) -> None:
-        """Initialize protocol-specific strategies."""
-        raise NotImplementedError
+        """Initialize protocol-specific strategies.
+
+        Subclasses must populate ``self._protocol_strategies`` with
+        :class:`ProtocolImplementation` instances keyed by protocol name.
+        """
 
     @property
     def configuration(self) -> BettingMarketConfiguration:
         return self._configuration
+
+    @property
+    def current_timestamp(self) -> float:
+        return cast(float, self.blockchain.current_timestamp)
 
     @property
     def supported_protocols(self) -> list[str]:
@@ -212,6 +272,13 @@ class BettingMarket(DecentralizedApplication):
     ) -> BlockchainTransaction:
         """Buy outcome tokens for a specific market outcome.
 
+        When ``max_price`` is omitted it is derived from the current price plus
+        the configured slippage tolerance and clamped at
+        :data:`MAX_DERIVED_OUTCOME_PRICE`: outcome prices are probabilities in
+        the open interval (0, 1), so a high-probability outcome (e.g. 0.99 with
+        5% slippage) would otherwise derive a price above 1.0 that the protocol
+        rejects. An explicit ``max_price`` is forwarded untouched.
+
         Args:
             market_id: The market identifier
             outcome_token_id: The outcome token to buy
@@ -225,8 +292,9 @@ class BettingMarket(DecentralizedApplication):
             current_price = await self.get_outcome_token_price(
                 market_id, outcome_token_id, protocol
             )
-            max_price = current_price * (
-                1 + self.configuration.default_slippage_tolerance
+            max_price = min(
+                current_price * (1 + self.configuration.default_slippage_tolerance),
+                MAX_DERIVED_OUTCOME_PRICE,
             )
 
         protocol_impl = self._get_protocol_implementation(protocol)
@@ -245,6 +313,13 @@ class BettingMarket(DecentralizedApplication):
     ) -> BlockchainTransaction:
         """Sell outcome tokens for a specific market outcome.
 
+        When ``min_price`` is omitted it is derived from the current price
+        minus the configured slippage tolerance and clamped at
+        :data:`MIN_DERIVED_OUTCOME_PRICE`, the mirror of the buy-side clamp:
+        a near-zero outcome price would otherwise derive a non-positive price
+        that the protocol rejects. An explicit ``min_price`` is forwarded
+        untouched.
+
         Args:
             market_id: The market identifier
             outcome_token_id: The outcome token to sell
@@ -258,8 +333,9 @@ class BettingMarket(DecentralizedApplication):
             current_price = await self.get_outcome_token_price(
                 market_id, outcome_token_id, protocol
             )
-            min_price = current_price * (
-                1 - self.configuration.default_slippage_tolerance
+            min_price = max(
+                current_price * (1 - self.configuration.default_slippage_tolerance),
+                MIN_DERIVED_OUTCOME_PRICE,
             )
 
         protocol_impl = self._get_protocol_implementation(protocol)

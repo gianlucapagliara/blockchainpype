@@ -18,7 +18,10 @@ class EthereumWalletIdentifier(BlockchainWalletIdentifier):
     address to create unique identifiers.
 
     Attributes:
+        name (str | None): Optional human-readable wallet name; when omitted the
+            identifier falls back to the platform:address form
         address (EthereumAddress): The Ethereum address associated with the wallet
     """
 
+    name: str | None = None
     address: EthereumAddress

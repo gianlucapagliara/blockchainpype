@@ -1,9 +1,11 @@
+from abc import ABC, abstractmethod
 from decimal import Decimal
-from typing import Protocol
+from typing import Protocol, cast, runtime_checkable
 
 from financepype.assets.blockchain import BlockchainAsset
 from financepype.operations.transactions.transaction import BlockchainTransaction
 from financepype.operators.dapps.dapp import DecentralizedApplication
+from financepype.owners.wallet import BlockchainWallet
 
 from .models import (
     BorrowingPosition,
@@ -16,8 +18,40 @@ from .models import (
 )
 
 
+@runtime_checkable
 class ProtocolImplementation(Protocol):
-    """Protocol-specific implementation of money market operations."""
+    """Structural contract for protocol-specific money market strategies.
+
+    Implementations translate protocol-agnostic lending/borrowing requests
+    into protocol-specific on-chain interactions. The :class:`MoneyMarket`
+    facade selects a strategy per call and delegates to these methods.
+
+    Contract:
+
+    * Read methods (``get_market_data``, ``get_user_account_data``,
+      ``get_lending_positions``, ``get_borrowing_positions``) MUST work
+      without a wallet.
+    * ``build_*`` methods MUST only build and return an unsigned
+      :class:`BlockchainTransaction` — never sign or broadcast it — and MUST
+      raise ``ValueError`` when a wallet is required but none is bound.
+    * Wallet binding: strategies that need a wallet to build transactions
+      (e.g. EVM implementations that need a sender address/nonce) SHOULD
+      accept an optional ``wallet`` keyword argument at construction and MUST
+      implement ``set_wallet`` so the owning facade (or application code) can
+      bind or replace the wallet after construction. Strategies that never
+      need a wallet to build (e.g. Solana implementations, where the wallet is
+      only used to sign an already built transaction) still implement
+      ``set_wallet``, binding it for their own execution helpers.
+    * Operations a protocol does not support MUST raise
+      ``NotImplementedError`` (e.g. Solend has no collateral toggle).
+
+    The protocol is runtime-checkable and intentionally contains only method
+    signatures (no behavior).
+    """
+
+    def set_wallet(self, wallet: BlockchainWallet | None) -> None:
+        """Bind (or unbind, with ``None``) the wallet used to build transactions."""
+        ...
 
     async def get_market_data(
         self,
@@ -62,8 +96,13 @@ class ProtocolImplementation(Protocol):
         asset: BlockchainAsset,
         amount: Decimal,
         user_address: str,
+        withdraw_all: bool = False,
     ) -> BlockchainTransaction:
-        """Build transaction to withdraw assets from the protocol."""
+        """Build transaction to withdraw assets from the protocol.
+
+        With ``withdraw_all`` the whole supplied position of ``asset`` is
+        withdrawn and ``amount`` is ignored.
+        """
         ...
 
     async def build_borrow_transaction(
@@ -108,7 +147,7 @@ class ProtocolImplementation(Protocol):
         ...
 
 
-class MoneyMarket(DecentralizedApplication):
+class MoneyMarket(DecentralizedApplication, ABC):
     """Base class for money market protocols like Aave."""
 
     def __init__(self, configuration: MoneyMarketConfiguration):
@@ -117,13 +156,21 @@ class MoneyMarket(DecentralizedApplication):
         self._protocol_strategies: dict[str, ProtocolImplementation] = {}
         self._initialize_protocols()
 
+    @abstractmethod
     def _initialize_protocols(self) -> None:
-        """Initialize protocol-specific strategies."""
-        raise NotImplementedError
+        """Initialize protocol-specific strategies.
+
+        Subclasses must populate ``self._protocol_strategies`` with
+        :class:`ProtocolImplementation` instances keyed by protocol name.
+        """
 
     @property
     def configuration(self) -> MoneyMarketConfiguration:
         return self._configuration
+
+    @property
+    def current_timestamp(self) -> float:
+        return cast(float, self.blockchain.current_timestamp)
 
     @property
     def supported_protocols(self) -> list[str]:
@@ -263,18 +310,22 @@ class MoneyMarket(DecentralizedApplication):
         amount: Decimal,
         user_address: str,
         protocol: str | None = None,
+        *,
+        withdraw_all: bool = False,
     ) -> BlockchainTransaction:
         """Withdraw assets from the money market.
 
         Args:
             asset: The asset to withdraw
-            amount: The amount to withdraw
+            amount: The amount to withdraw (ignored when ``withdraw_all``)
             user_address: The user's wallet address
             protocol: Specific protocol to use, if None uses first available
+            withdraw_all: Whether to withdraw the full supplied position.
+                Keyword-only so positional ``protocol`` callers keep working.
         """
         protocol_impl = self._get_protocol_implementation(protocol)
         return await protocol_impl.build_withdraw_transaction(
-            asset, amount, user_address
+            asset, amount, user_address, withdraw_all=withdraw_all
         )
 
     async def borrow(

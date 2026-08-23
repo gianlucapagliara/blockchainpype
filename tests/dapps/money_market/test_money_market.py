@@ -2,20 +2,20 @@
 Unit tests for base MoneyMarket class.
 
 This module tests:
-- MoneyMarket initialization and configuration
-- Protocol strategy management
-- Core operation methods
+- MoneyMarket initialization, abstract contract and configuration
+- Protocol strategy dispatch (named, first-available and aggregation)
+- Core operation methods delegating to the strategies
 - Error handling and validation
 """
 
 from decimal import Decimal
-from unittest.mock import MagicMock
 
 import pytest
-from financepype.operators.blockchains.models import BlockchainPlatform
+from financepype.assets.blockchain import BlockchainAsset
+from financepype.owners.wallet import BlockchainWallet
+from financepype.platforms.blockchain import BlockchainPlatform
 
 from blockchainpype.dapps.money_market import (
-    BlockchainAsset,
     BorrowingPosition,
     CollateralMode,
     InterestRateMode,
@@ -24,42 +24,38 @@ from blockchainpype.dapps.money_market import (
     MoneyMarket,
     MoneyMarketConfiguration,
     ProtocolConfiguration,
+    ProtocolImplementation,
     UserAccountData,
 )
-from blockchainpype.evm.asset import EthereumAssetData
-from blockchainpype.evm.blockchain.identifier import EthereumAddress
-from blockchainpype.initializer import BlockchainsInitializer, SupportedBlockchainType
+from tests.dapps.helpers import FIXED_TIMESTAMP, StubTransaction, make_transaction
 
 
-class MockEthereumAsset(BlockchainAsset):
-    """Mock EthereumAsset for testing."""
+class StubProtocolImplementation:
+    """Stub protocol implementation recording calls and returning real models."""
 
-    def __init__(self, symbol: str, decimals: int, address: str):
-        # Since BlockchainAsset is just a mock class, we can add attributes directly
-        self.identifier = EthereumAddress.from_string(address)
-        self.data = EthereumAssetData(
-            name=f"{symbol} Token", symbol=symbol, decimals=decimals
-        )
-
-    @property
-    def address(self) -> EthereumAddress:
-        return self.identifier
-
-    @address.setter
-    def address(self, value: EthereumAddress) -> None:
-        self.identifier = value
-
-
-class MockProtocolImplementation:
-    """Mock protocol implementation for testing."""
-
-    def __init__(self, protocol_name: str):
+    def __init__(
+        self,
+        protocol_name: str,
+        platform: BlockchainPlatform,
+        position_asset: BlockchainAsset | None = None,
+        supply_apy: Decimal = Decimal("0.05"),
+    ):
         self.protocol_name = protocol_name
+        self.platform = platform
+        self.position_asset = position_asset
+        self.supply_apy = supply_apy
+        self.wallet: BlockchainWallet | None = None
+        self.calls: list[tuple] = []
 
-    async def get_market_data(self, asset) -> MarketData:
+    def set_wallet(self, wallet: BlockchainWallet | None) -> None:
+        self.calls.append(("set_wallet", wallet))
+        self.wallet = wallet
+
+    async def get_market_data(self, asset: BlockchainAsset) -> MarketData:
+        self.calls.append(("get_market_data", asset))
         return MarketData(
             asset=asset,
-            supply_apy=Decimal("0.05"),
+            supply_apy=self.supply_apy,
             variable_borrow_apy=Decimal("0.08"),
             stable_borrow_apy=Decimal("0.07"),
             total_supply=Decimal("1000000"),
@@ -76,6 +72,7 @@ class MockProtocolImplementation:
         )
 
     async def get_user_account_data(self, user_address: str) -> UserAccountData:
+        self.calls.append(("get_user_account_data", user_address))
         return UserAccountData(
             total_collateral_value=Decimal("10000"),
             total_debt_value=Decimal("5000"),
@@ -87,105 +84,158 @@ class MockProtocolImplementation:
         )
 
     async def get_lending_positions(self, user_address: str) -> list[LendingPosition]:
-        return []
+        self.calls.append(("get_lending_positions", user_address))
+        if self.position_asset is None:
+            return []
+        return [
+            LendingPosition(
+                asset=self.position_asset,
+                supplied_amount=Decimal("1000"),
+                accrued_interest=Decimal("25"),
+                apy=self.supply_apy,
+                is_collateral=True,
+                protocol=self.protocol_name,
+            )
+        ]
 
     async def get_borrowing_positions(
         self, user_address: str
     ) -> list[BorrowingPosition]:
-        return []
+        self.calls.append(("get_borrowing_positions", user_address))
+        if self.position_asset is None:
+            return []
+        return [
+            BorrowingPosition(
+                asset=self.position_asset,
+                borrowed_amount=Decimal("0.5"),
+                accrued_interest=Decimal("0.01"),
+                interest_rate_mode=InterestRateMode.VARIABLE,
+                current_rate=Decimal("0.08"),
+                protocol=self.protocol_name,
+            )
+        ]
 
     async def build_supply_transaction(
-        self, asset, amount, user_address, enable_as_collateral=True
-    ):
-        return MagicMock()
+        self,
+        asset: BlockchainAsset,
+        amount: Decimal,
+        user_address: str,
+        enable_as_collateral: bool = True,
+    ) -> StubTransaction:
+        self.calls.append(
+            (
+                "build_supply_transaction",
+                asset,
+                amount,
+                user_address,
+                enable_as_collateral,
+            )
+        )
+        return make_transaction(self.platform)
 
-    async def build_withdraw_transaction(self, asset, amount, user_address):
-        return MagicMock()
+    async def build_withdraw_transaction(
+        self,
+        asset: BlockchainAsset,
+        amount: Decimal,
+        user_address: str,
+        withdraw_all: bool = False,
+    ) -> StubTransaction:
+        self.calls.append(
+            (
+                "build_withdraw_transaction",
+                asset,
+                amount,
+                user_address,
+                withdraw_all,
+            )
+        )
+        return make_transaction(self.platform)
 
     async def build_borrow_transaction(
-        self, asset, amount, interest_rate_mode, user_address
-    ):
-        return MagicMock()
+        self,
+        asset: BlockchainAsset,
+        amount: Decimal,
+        interest_rate_mode: InterestRateMode,
+        user_address: str,
+    ) -> StubTransaction:
+        self.calls.append(
+            (
+                "build_borrow_transaction",
+                asset,
+                amount,
+                interest_rate_mode,
+                user_address,
+            )
+        )
+        return make_transaction(self.platform)
 
     async def build_repay_transaction(
-        self, asset, amount, interest_rate_mode, user_address, repay_all=False
-    ):
-        return MagicMock()
+        self,
+        asset: BlockchainAsset,
+        amount: Decimal,
+        interest_rate_mode: InterestRateMode,
+        user_address: str,
+        repay_all: bool = False,
+    ) -> StubTransaction:
+        self.calls.append(
+            (
+                "build_repay_transaction",
+                asset,
+                amount,
+                interest_rate_mode,
+                user_address,
+                repay_all,
+            )
+        )
+        return make_transaction(self.platform)
 
-    async def build_collateral_transaction(self, asset, mode, user_address):
-        return MagicMock()
+    async def build_collateral_transaction(
+        self, asset: BlockchainAsset, mode: CollateralMode, user_address: str
+    ) -> StubTransaction:
+        self.calls.append(("build_collateral_transaction", asset, mode, user_address))
+        return make_transaction(self.platform)
 
     async def build_liquidation_transaction(
         self,
-        collateral_asset,
-        debt_asset,
-        user_to_liquidate,
-        debt_to_cover,
-        receive_collateral=True,
-    ):
-        return MagicMock()
+        collateral_asset: BlockchainAsset,
+        debt_asset: BlockchainAsset,
+        user_to_liquidate: str,
+        debt_to_cover: Decimal,
+        receive_collateral: bool = True,
+    ) -> StubTransaction:
+        self.calls.append(
+            (
+                "build_liquidation_transaction",
+                collateral_asset,
+                debt_asset,
+                user_to_liquidate,
+                debt_to_cover,
+                receive_collateral,
+            )
+        )
+        return make_transaction(self.platform)
 
 
-class MockMoneyMarket(MoneyMarket):
-    """Mock implementation of MoneyMarket for testing."""
+class StubMoneyMarket(MoneyMarket):
+    """Concrete MoneyMarket wiring one stub strategy per configured protocol."""
 
     def _initialize_protocols(self) -> None:
-        """Initialize mock protocol strategies."""
         for protocol_config in self.configuration.protocols:
             self._protocol_strategies[protocol_config.protocol_name] = (
-                MockProtocolImplementation(protocol_config.protocol_name)
+                StubProtocolImplementation(
+                    protocol_config.protocol_name, self.configuration.platform
+                )
             )
 
 
-@pytest.fixture
-def usdc_asset():
-    """Create a mock USDC asset."""
-    return MockEthereumAsset("USDC", 6, "0xA0b86a33E6441b0c2D7f1E8A6F7A7f6F5e9b5b5b")
+USER_ADDRESS = "0x1234567890123456789012345678901234567890"
 
 
 @pytest.fixture
-def weth_asset():
-    """Create a mock WETH asset."""
-    return MockEthereumAsset("WETH", 18, "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
-
-
-@pytest.fixture
-def sample_protocol():
-    """Create a sample protocol configuration."""
-    return ProtocolConfiguration(
-        protocol_name="Test Protocol",
-        lending_pool_address="0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2",
-        data_provider_address="0x7B4EB56E7CD4b454BA8ff71E4518426369a138a3",
-    )
-
-
-@pytest.fixture(scope="session", autouse=True)
-def setup_blockchains():
-    """Setup blockchain configurations for testing."""
-    from blockchainpype.factory import BlockchainFactory
-
-    # Reset the factory to avoid configuration conflicts
-    BlockchainFactory.reset()
-
-    # Configure blockchains
-    BlockchainsInitializer.configure()
-
-
-@pytest.fixture
-def test_platform():
-    """Create a test blockchain platform."""
-    return BlockchainPlatform(
-        identifier="ethereum",
-        type=SupportedBlockchainType.EVM.value,
-        chain_id=1,
-    )
-
-
-@pytest.fixture
-def money_market_config(sample_protocol, test_platform):
+def money_market_config(sample_protocol, dapp_platform):
     """Create a money market configuration."""
     return MoneyMarketConfiguration(
-        platform=test_platform,
+        platform=dapp_platform,
         protocols=[sample_protocol],
         default_interest_rate_mode=InterestRateMode.VARIABLE,
         default_collateral_mode=CollateralMode.ENABLED,
@@ -195,15 +245,26 @@ def money_market_config(sample_protocol, test_platform):
 @pytest.fixture
 def money_market(money_market_config):
     """Create a money market instance."""
-    return MockMoneyMarket(money_market_config)
+    return StubMoneyMarket(money_market_config)
+
+
+@pytest.fixture
+def stub_strategy(money_market) -> StubProtocolImplementation:
+    """The single wired stub strategy."""
+    return money_market._protocol_strategies["Test Protocol"]
 
 
 class TestMoneyMarketInitialization:
     """Test MoneyMarket initialization."""
 
+    def test_abstract_base_cannot_be_instantiated(self, money_market_config):
+        """MoneyMarket must be a real ABC enforcing _initialize_protocols."""
+        with pytest.raises(TypeError, match="_initialize_protocols"):
+            MoneyMarket(money_market_config)
+
     def test_initialization_with_valid_config(self, money_market_config):
         """Test initialization with valid configuration."""
-        money_market = MockMoneyMarket(money_market_config)
+        money_market = StubMoneyMarket(money_market_config)
 
         assert money_market.configuration == money_market_config
         assert len(money_market.supported_protocols) == 1
@@ -221,11 +282,14 @@ class TestMoneyMarketInitialization:
         assert isinstance(protocols, list)
         assert "Test Protocol" in protocols
 
+    def test_current_timestamp_from_blockchain(self, money_market):
+        """current_timestamp must delegate to the resolved blockchain."""
+        assert money_market.current_timestamp == FIXED_TIMESTAMP
+
 
 class TestMoneyMarketDataQueries:
     """Test MoneyMarket data query methods."""
 
-    @pytest.mark.asyncio
     async def test_get_market_data_with_protocol(self, money_market, usdc_asset):
         """Test getting market data with specific protocol."""
         market_data = await money_market.get_market_data(
@@ -237,7 +301,6 @@ class TestMoneyMarketDataQueries:
         assert market_data.protocol == "Test Protocol"
         assert market_data.supply_apy == Decimal("0.05")
 
-    @pytest.mark.asyncio
     async def test_get_market_data_default_protocol(self, money_market, usdc_asset):
         """Test getting market data with default protocol."""
         market_data = await money_market.get_market_data(usdc_asset)
@@ -246,198 +309,231 @@ class TestMoneyMarketDataQueries:
         assert market_data.asset == usdc_asset
         assert market_data.protocol == "Test Protocol"
 
-    @pytest.mark.asyncio
     async def test_get_market_data_unsupported_protocol(self, money_market, usdc_asset):
         """Test getting market data with unsupported protocol."""
         with pytest.raises(ValueError, match="Unsupported protocol: Unknown"):
             await money_market.get_market_data(usdc_asset, protocol="Unknown")
 
-    @pytest.mark.asyncio
     async def test_get_user_account_data_with_protocol(self, money_market):
         """Test getting user account data with specific protocol."""
-        user_address = "0x1234567890123456789012345678901234567890"
         account_data = await money_market.get_user_account_data(
-            user_address, protocol="Test Protocol"
+            USER_ADDRESS, protocol="Test Protocol"
         )
 
         assert isinstance(account_data, UserAccountData)
         assert account_data.protocol == "Test Protocol"
         assert account_data.health_factor == Decimal("1.6")
 
-    @pytest.mark.asyncio
     async def test_get_user_account_data_default_protocol(self, money_market):
         """Test getting user account data with default protocol."""
-        user_address = "0x1234567890123456789012345678901234567890"
-        account_data = await money_market.get_user_account_data(user_address)
+        account_data = await money_market.get_user_account_data(USER_ADDRESS)
 
         assert isinstance(account_data, UserAccountData)
         assert account_data.protocol == "Test Protocol"
 
-    @pytest.mark.asyncio
-    async def test_get_lending_positions_with_protocol(self, money_market):
+    async def test_get_lending_positions_with_protocol(
+        self, money_market, stub_strategy, usdc_asset
+    ):
         """Test getting lending positions with specific protocol."""
-        user_address = "0x1234567890123456789012345678901234567890"
+        stub_strategy.position_asset = usdc_asset
+
         positions = await money_market.get_lending_positions(
-            user_address, protocol="Test Protocol"
+            USER_ADDRESS, protocol="Test Protocol"
         )
 
-        assert isinstance(positions, list)
-        # Mock returns empty list
-        assert len(positions) == 0
+        assert len(positions) == 1
+        assert positions[0].asset == usdc_asset
+        assert positions[0].protocol == "Test Protocol"
 
-    @pytest.mark.asyncio
-    async def test_get_lending_positions_aggregate(self, money_market):
-        """Test getting lending positions aggregated across protocols."""
-        user_address = "0x1234567890123456789012345678901234567890"
-        positions = await money_market.get_lending_positions(user_address)
-
-        assert isinstance(positions, list)
-        # Mock returns empty list
-        assert len(positions) == 0
-
-    @pytest.mark.asyncio
-    async def test_get_borrowing_positions_with_protocol(self, money_market):
+    async def test_get_borrowing_positions_with_protocol(
+        self, money_market, stub_strategy, weth_asset
+    ):
         """Test getting borrowing positions with specific protocol."""
-        user_address = "0x1234567890123456789012345678901234567890"
+        stub_strategy.position_asset = weth_asset
+
         positions = await money_market.get_borrowing_positions(
-            user_address, protocol="Test Protocol"
+            USER_ADDRESS, protocol="Test Protocol"
         )
 
-        assert isinstance(positions, list)
-        # Mock returns empty list
-        assert len(positions) == 0
-
-    @pytest.mark.asyncio
-    async def test_get_borrowing_positions_aggregate(self, money_market):
-        """Test getting borrowing positions aggregated across protocols."""
-        user_address = "0x1234567890123456789012345678901234567890"
-        positions = await money_market.get_borrowing_positions(user_address)
-
-        assert isinstance(positions, list)
-        # Mock returns empty list
-        assert len(positions) == 0
+        assert len(positions) == 1
+        assert positions[0].asset == weth_asset
+        assert positions[0].total_debt == Decimal("0.51")
 
 
 class TestMoneyMarketOperations:
     """Test MoneyMarket operation methods."""
 
-    @pytest.mark.asyncio
-    async def test_supply_with_defaults(self, money_market, usdc_asset):
-        """Test supply operation with default parameters."""
-        user_address = "0x1234567890123456789012345678901234567890"
+    async def test_supply_with_defaults(self, money_market, stub_strategy, usdc_asset):
+        """Supply must forward the configured default collateral mode."""
         transaction = await money_market.supply(
-            usdc_asset, Decimal("1000"), user_address
+            usdc_asset, Decimal("1000"), USER_ADDRESS
         )
 
-        # Mock returns MagicMock
-        assert transaction is not None
+        assert isinstance(transaction, StubTransaction)
+        assert stub_strategy.calls[-1] == (
+            "build_supply_transaction",
+            usdc_asset,
+            Decimal("1000"),
+            USER_ADDRESS,
+            True,  # default_collateral_mode == ENABLED
+        )
 
-    @pytest.mark.asyncio
-    async def test_supply_with_collateral_disabled(self, money_market, usdc_asset):
+    async def test_supply_with_collateral_disabled(
+        self, money_market, stub_strategy, usdc_asset
+    ):
         """Test supply operation with collateral disabled."""
-        user_address = "0x1234567890123456789012345678901234567890"
-        transaction = await money_market.supply(
-            usdc_asset, Decimal("1000"), user_address, enable_as_collateral=False
+        await money_market.supply(
+            usdc_asset, Decimal("1000"), USER_ADDRESS, enable_as_collateral=False
         )
 
-        assert transaction is not None
+        assert stub_strategy.calls[-1][4] is False
 
-    @pytest.mark.asyncio
     async def test_supply_with_specific_protocol(self, money_market, usdc_asset):
         """Test supply operation with specific protocol."""
-        user_address = "0x1234567890123456789012345678901234567890"
         transaction = await money_market.supply(
-            usdc_asset, Decimal("1000"), user_address, protocol="Test Protocol"
+            usdc_asset, Decimal("1000"), USER_ADDRESS, protocol="Test Protocol"
         )
 
-        assert transaction is not None
+        assert isinstance(transaction, StubTransaction)
 
-    @pytest.mark.asyncio
-    async def test_withdraw(self, money_market, usdc_asset):
+    async def test_withdraw(self, money_market, stub_strategy, usdc_asset):
         """Test withdraw operation."""
-        user_address = "0x1234567890123456789012345678901234567890"
         transaction = await money_market.withdraw(
-            usdc_asset, Decimal("500"), user_address
+            usdc_asset, Decimal("500"), USER_ADDRESS
         )
 
-        assert transaction is not None
-
-    @pytest.mark.asyncio
-    async def test_borrow_with_defaults(self, money_market, weth_asset):
-        """Test borrow operation with default parameters."""
-        user_address = "0x1234567890123456789012345678901234567890"
-        transaction = await money_market.borrow(
-            weth_asset, Decimal("0.5"), user_address
+        assert isinstance(transaction, StubTransaction)
+        assert stub_strategy.calls[-1] == (
+            "build_withdraw_transaction",
+            usdc_asset,
+            Decimal("500"),
+            USER_ADDRESS,
+            False,
         )
 
-        assert transaction is not None
+    async def test_withdraw_all(self, money_market, stub_strategy, usdc_asset):
+        """withdraw_all must reach the strategy, mirroring repay_all."""
+        transaction = await money_market.withdraw(
+            usdc_asset, Decimal("0"), USER_ADDRESS, withdraw_all=True
+        )
 
-    @pytest.mark.asyncio
-    async def test_borrow_with_stable_rate(self, money_market, weth_asset):
-        """Test borrow operation with stable interest rate."""
-        user_address = "0x1234567890123456789012345678901234567890"
+        assert isinstance(transaction, StubTransaction)
+        assert stub_strategy.calls[-1] == (
+            "build_withdraw_transaction",
+            usdc_asset,
+            Decimal("0"),
+            USER_ADDRESS,
+            True,
+        )
+
+    async def test_withdraw_with_specific_protocol(self, money_market, usdc_asset):
+        """withdraw_all must also be forwarded on the named-protocol path."""
+        transaction = await money_market.withdraw(
+            usdc_asset,
+            Decimal("0"),
+            USER_ADDRESS,
+            withdraw_all=True,
+            protocol="Test Protocol",
+        )
+
+        assert isinstance(transaction, StubTransaction)
+
+    async def test_borrow_with_defaults(self, money_market, stub_strategy, weth_asset):
+        """Borrow must forward the configured default interest rate mode."""
         transaction = await money_market.borrow(
+            weth_asset, Decimal("0.5"), USER_ADDRESS
+        )
+
+        assert isinstance(transaction, StubTransaction)
+        assert stub_strategy.calls[-1] == (
+            "build_borrow_transaction",
             weth_asset,
             Decimal("0.5"),
-            user_address,
+            InterestRateMode.VARIABLE,
+            USER_ADDRESS,
+        )
+
+    async def test_borrow_with_stable_rate(
+        self, money_market, stub_strategy, weth_asset
+    ):
+        """Test borrow operation with stable interest rate."""
+        await money_market.borrow(
+            weth_asset,
+            Decimal("0.5"),
+            USER_ADDRESS,
             interest_rate_mode=InterestRateMode.STABLE,
         )
 
-        assert transaction is not None
+        assert stub_strategy.calls[-1][3] == InterestRateMode.STABLE
 
-    @pytest.mark.asyncio
-    async def test_repay(self, money_market, weth_asset):
+    async def test_repay(self, money_market, stub_strategy, weth_asset):
         """Test repay operation."""
-        user_address = "0x1234567890123456789012345678901234567890"
-        transaction = await money_market.repay(weth_asset, Decimal("0.1"), user_address)
+        transaction = await money_market.repay(weth_asset, Decimal("0.1"), USER_ADDRESS)
 
-        assert transaction is not None
+        assert isinstance(transaction, StubTransaction)
+        assert stub_strategy.calls[-1] == (
+            "build_repay_transaction",
+            weth_asset,
+            Decimal("0.1"),
+            InterestRateMode.VARIABLE,
+            USER_ADDRESS,
+            False,
+        )
 
-    @pytest.mark.asyncio
-    async def test_repay_all(self, money_market, weth_asset):
+    async def test_repay_all(self, money_market, stub_strategy, weth_asset):
         """Test repay all operation."""
-        user_address = "0x1234567890123456789012345678901234567890"
-        transaction = await money_market.repay(
-            weth_asset, Decimal("0"), user_address, repay_all=True
-        )
+        await money_market.repay(weth_asset, Decimal("0"), USER_ADDRESS, repay_all=True)
 
-        assert transaction is not None
+        assert stub_strategy.calls[-1][5] is True
 
-    @pytest.mark.asyncio
-    async def test_set_collateral_mode_enable(self, money_market, usdc_asset):
+    async def test_set_collateral_mode_enable(
+        self, money_market, stub_strategy, usdc_asset
+    ):
         """Test enabling asset as collateral."""
-        user_address = "0x1234567890123456789012345678901234567890"
-        transaction = await money_market.set_collateral_mode(
-            usdc_asset, CollateralMode.ENABLED, user_address
+        await money_market.set_collateral_mode(
+            usdc_asset, CollateralMode.ENABLED, USER_ADDRESS
         )
 
-        assert transaction is not None
+        assert stub_strategy.calls[-1] == (
+            "build_collateral_transaction",
+            usdc_asset,
+            CollateralMode.ENABLED,
+            USER_ADDRESS,
+        )
 
-    @pytest.mark.asyncio
-    async def test_set_collateral_mode_disable(self, money_market, usdc_asset):
+    async def test_set_collateral_mode_disable(
+        self, money_market, stub_strategy, usdc_asset
+    ):
         """Test disabling asset as collateral."""
-        user_address = "0x1234567890123456789012345678901234567890"
-        transaction = await money_market.set_collateral_mode(
-            usdc_asset, CollateralMode.DISABLED, user_address
+        await money_market.set_collateral_mode(
+            usdc_asset, CollateralMode.DISABLED, USER_ADDRESS
         )
 
-        assert transaction is not None
+        assert stub_strategy.calls[-1][2] == CollateralMode.DISABLED
 
-    @pytest.mark.asyncio
-    async def test_liquidate(self, money_market, usdc_asset, weth_asset):
+    async def test_liquidate(self, money_market, stub_strategy, usdc_asset, weth_asset):
         """Test liquidation operation."""
         user_to_liquidate = "0x9876543210987654321098765432109876543210"
         transaction = await money_market.liquidate(
             weth_asset, usdc_asset, user_to_liquidate, Decimal("1000")
         )
 
-        assert transaction is not None
+        assert isinstance(transaction, StubTransaction)
+        assert stub_strategy.calls[-1] == (
+            "build_liquidation_transaction",
+            weth_asset,
+            usdc_asset,
+            user_to_liquidate,
+            Decimal("1000"),
+            True,
+        )
 
-    @pytest.mark.asyncio
-    async def test_liquidate_receive_atoken(self, money_market, usdc_asset, weth_asset):
+    async def test_liquidate_receive_atoken(
+        self, money_market, stub_strategy, usdc_asset, weth_asset
+    ):
         """Test liquidation operation receiving aTokens."""
         user_to_liquidate = "0x9876543210987654321098765432109876543210"
-        transaction = await money_market.liquidate(
+        await money_market.liquidate(
             weth_asset,
             usdc_asset,
             user_to_liquidate,
@@ -445,36 +541,65 @@ class TestMoneyMarketOperations:
             receive_collateral=False,
         )
 
-        assert transaction is not None
+        assert stub_strategy.calls[-1][5] is False
+
+
+class StrategyWithoutSetWallet:
+    """Every money-market method except the wallet binding one."""
+
+    async def get_market_data(self, asset): ...
+    async def get_user_account_data(self, user_address): ...
+    async def get_lending_positions(self, user_address): ...
+    async def get_borrowing_positions(self, user_address): ...
+    async def build_supply_transaction(self, *args, **kwargs): ...
+    async def build_withdraw_transaction(self, *args, **kwargs): ...
+    async def build_borrow_transaction(self, *args, **kwargs): ...
+    async def build_repay_transaction(self, *args, **kwargs): ...
+    async def build_collateral_transaction(self, *args, **kwargs): ...
+    async def build_liquidation_transaction(self, *args, **kwargs): ...
+
+
+class TestProtocolContract:
+    """The money-market ProtocolImplementation is a runtime-checkable contract."""
+
+    def test_protocol_is_runtime_checkable(self, stub_strategy):
+        assert isinstance(stub_strategy, ProtocolImplementation)
+
+    def test_incomplete_implementation_does_not_conform(self):
+        assert not isinstance(StrategyWithoutSetWallet(), ProtocolImplementation)
+
+    def test_set_wallet_is_part_of_the_contract(self, stub_strategy):
+        sentinel = object()
+        stub_strategy.set_wallet(sentinel)
+        assert stub_strategy.wallet is sentinel
+
+        stub_strategy.set_wallet(None)
+        assert stub_strategy.wallet is None
 
 
 class TestMoneyMarketErrorHandling:
     """Test MoneyMarket error handling."""
 
-    def test_no_protocols_configured(self, test_platform):
+    def test_no_protocols_configured(self, dapp_platform):
         """Test error when no protocols are configured."""
-        empty_config = MoneyMarketConfiguration(platform=test_platform, protocols=[])
-        money_market = MockMoneyMarket(empty_config)
+        empty_config = MoneyMarketConfiguration(platform=dapp_platform, protocols=[])
+        money_market = StubMoneyMarket(empty_config)
 
         assert len(money_market.supported_protocols) == 0
 
-    @pytest.mark.asyncio
-    async def test_no_protocols_configured_market_data(self, test_platform):
+    async def test_no_protocols_configured_market_data(self, dapp_platform, usdc_asset):
         """Test error when getting market data with no protocols configured."""
-        empty_config = MoneyMarketConfiguration(platform=test_platform, protocols=[])
-        money_market = MockMoneyMarket(empty_config)
+        empty_config = MoneyMarketConfiguration(platform=dapp_platform, protocols=[])
+        money_market = StubMoneyMarket(empty_config)
 
         with pytest.raises(ValueError, match="No protocols configured"):
-            await money_market.get_market_data(MagicMock())
+            await money_market.get_market_data(usdc_asset)
 
-    @pytest.mark.asyncio
     async def test_unsupported_protocol_supply(self, money_market, usdc_asset):
         """Test error when using unsupported protocol for supply."""
-        user_address = "0x1234567890123456789012345678901234567890"
-
         with pytest.raises(ValueError, match="Unsupported protocol: Unknown"):
             await money_market.supply(
-                usdc_asset, Decimal("1000"), user_address, protocol="Unknown"
+                usdc_asset, Decimal("1000"), USER_ADDRESS, protocol="Unknown"
             )
 
     def test_get_protocol_implementation_unsupported(self, money_market):
@@ -482,10 +607,10 @@ class TestMoneyMarketErrorHandling:
         with pytest.raises(ValueError, match="Unsupported protocol: Unknown"):
             money_market._get_protocol_implementation("Unknown")
 
-    def test_get_protocol_implementation_no_protocols(self, test_platform):
+    def test_get_protocol_implementation_no_protocols(self, dapp_platform):
         """Test _get_protocol_implementation with no protocols configured."""
-        empty_config = MoneyMarketConfiguration(platform=test_platform, protocols=[])
-        money_market = MockMoneyMarket(empty_config)
+        empty_config = MoneyMarketConfiguration(platform=dapp_platform, protocols=[])
+        money_market = StubMoneyMarket(empty_config)
 
         with pytest.raises(ValueError, match="No protocols configured"):
             money_market._get_protocol_implementation(None)
@@ -493,15 +618,28 @@ class TestMoneyMarketErrorHandling:
     def test_get_protocol_implementation_default(self, money_market):
         """Test _get_protocol_implementation with default protocol."""
         impl = money_market._get_protocol_implementation(None)
-        assert isinstance(impl, MockProtocolImplementation)
+        assert isinstance(impl, StubProtocolImplementation)
         assert impl.protocol_name == "Test Protocol"
+
+    async def test_strategy_error_propagates(
+        self, money_market, stub_strategy, usdc_asset
+    ):
+        """Errors raised by a strategy must reach the caller unchanged."""
+
+        async def failing_build(*args, **kwargs):
+            raise ValueError("Insufficient allowance")
+
+        stub_strategy.build_supply_transaction = failing_build
+
+        with pytest.raises(ValueError, match="Insufficient allowance"):
+            await money_market.supply(usdc_asset, Decimal("1000"), USER_ADDRESS)
 
 
 class TestMoneyMarketMultiProtocol:
     """Test MoneyMarket with multiple protocols."""
 
     @pytest.fixture
-    def multi_protocol_config(self, test_platform):
+    def multi_protocol_config(self, dapp_platform):
         """Create configuration with multiple protocols."""
         protocols = [
             ProtocolConfiguration(
@@ -515,21 +653,18 @@ class TestMoneyMarketMultiProtocol:
                 data_provider_address="0x0987654321098765432109876543210987654321",
             ),
         ]
-        return MoneyMarketConfiguration(platform=test_platform, protocols=protocols)
+        return MoneyMarketConfiguration(platform=dapp_platform, protocols=protocols)
 
     @pytest.fixture
     def multi_protocol_money_market(self, multi_protocol_config):
         """Create money market with multiple protocols."""
-        return MockMoneyMarket(multi_protocol_config)
+        return StubMoneyMarket(multi_protocol_config)
 
     def test_multiple_protocols_initialization(self, multi_protocol_money_market):
         """Test initialization with multiple protocols."""
         protocols = multi_protocol_money_market.supported_protocols
-        assert len(protocols) == 2
-        assert "Aave V3" in protocols
-        assert "Compound V3" in protocols
+        assert protocols == ["Aave V3", "Compound V3"]
 
-    @pytest.mark.asyncio
     async def test_specific_protocol_selection(
         self, multi_protocol_money_market, usdc_asset
     ):
@@ -538,3 +673,70 @@ class TestMoneyMarketMultiProtocol:
             usdc_asset, protocol="Compound V3"
         )
         assert market_data.protocol == "Compound V3"
+
+    async def test_lending_positions_aggregate_across_protocols(
+        self, multi_protocol_money_market, usdc_asset, weth_asset
+    ):
+        """Positions must be aggregated from every configured protocol."""
+        strategies = multi_protocol_money_market._protocol_strategies
+        strategies["Aave V3"].position_asset = usdc_asset
+        strategies["Compound V3"].position_asset = weth_asset
+
+        positions = await multi_protocol_money_market.get_lending_positions(
+            USER_ADDRESS
+        )
+
+        assert len(positions) == 2
+        assert {position.protocol for position in positions} == {
+            "Aave V3",
+            "Compound V3",
+        }
+        assert {position.asset for position in positions} == {usdc_asset, weth_asset}
+
+    async def test_borrowing_positions_aggregate_across_protocols(
+        self, multi_protocol_money_market, usdc_asset, weth_asset
+    ):
+        """Borrowing positions must be aggregated from every protocol."""
+        strategies = multi_protocol_money_market._protocol_strategies
+        strategies["Aave V3"].position_asset = usdc_asset
+        strategies["Compound V3"].position_asset = weth_asset
+
+        positions = await multi_protocol_money_market.get_borrowing_positions(
+            USER_ADDRESS
+        )
+
+        assert len(positions) == 2
+        assert {position.protocol for position in positions} == {
+            "Aave V3",
+            "Compound V3",
+        }
+
+
+class TestWithdrawSignatureCompatibility:
+    """Regression: ``protocol`` stays the 4th positional parameter.
+
+    ``withdraw_all`` was added keyword-only so pre-existing positional
+    ``withdraw(asset, amount, address, "protocol")`` callers keep their
+    meaning instead of silently withdrawing the entire position.
+    """
+
+    async def test_protocol_passed_positionally(
+        self, money_market, stub_strategy, usdc_asset
+    ):
+        await money_market.withdraw(
+            usdc_asset, Decimal("500"), USER_ADDRESS, "Test Protocol"
+        )
+
+        assert stub_strategy.calls[-1] == (
+            "build_withdraw_transaction",
+            usdc_asset,
+            Decimal("500"),
+            USER_ADDRESS,
+            False,
+        )
+
+    async def test_withdraw_all_is_keyword_only(self, money_market, usdc_asset):
+        with pytest.raises(TypeError):
+            await money_market.withdraw(
+                usdc_asset, Decimal("500"), USER_ADDRESS, "Test Protocol", True
+            )

@@ -12,6 +12,17 @@ from pydantic import Field
 from solders.pubkey import Pubkey
 from solders.signature import Signature
 
+# Sentinel used by this library to identify the native SOL asset, which has no
+# mint account on-chain. This is NOT a real on-chain account: it is one
+# character short of the wrapped-SOL mint below and only serves as a stable
+# placeholder identifier.
+NATIVE_SOL_SENTINEL_ADDRESS = "So11111111111111111111111111111111111111111"
+
+# Canonical mint address of wrapped SOL (wSOL), the SPL-token representation
+# of SOL. Note the trailing "2": this is a real mint account and must not be
+# confused with the native-SOL sentinel above.
+WRAPPED_SOL_MINT_ADDRESS = "So11111111111111111111111111111111111111112"
+
 
 class SolanaTransactionSignature(BlockchainIdentifier):
     """
@@ -157,16 +168,20 @@ class SolanaAddress(SolanaPublicKey):
 
 class SolanaNullAddress(SolanaAddress):
     """
-    Represents the null Solana address.
+    Represents the null Solana address used as the native SOL sentinel.
+
+    Native SOL has no mint account, so this library identifies it with the
+    NATIVE_SOL_SENTINEL_ADDRESS placeholder. This is deliberately distinct
+    from the canonical wrapped-SOL (wSOL) mint WRAPPED_SOL_MINT_ADDRESS
+    (which ends in "2"): wrapped SOL is a real SPL token and must be modeled
+    as such, not through this sentinel.
     """
 
     raw: Pubkey = Field(
-        default_factory=lambda: Pubkey.from_string(
-            "So11111111111111111111111111111111111111111"
-        ),
+        default_factory=lambda: Pubkey.from_string(NATIVE_SOL_SENTINEL_ADDRESS),
         init=False,
     )
     string: str = Field(
-        default_factory=lambda: "So11111111111111111111111111111111111111111",
+        default_factory=lambda: NATIVE_SOL_SENTINEL_ADDRESS,
         init=False,
     )

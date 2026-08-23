@@ -14,17 +14,19 @@ from solders.message import Message, MessageV0
 from solders.pubkey import Pubkey
 from solders.signature import Signature
 from solders.transaction import Transaction, VersionedTransaction
-from solders.transaction_status import TransactionStatus
+from solders.transaction_status import EncodedConfirmedTransactionWithStatusMeta
 
 from blockchainpype.solana.blockchain.identifier import SolanaTransactionSignature
 
 
 class SolanaTransactionReceipt(BlockchainTransactionReceipt):
     """
-    Represents a Solana transaction receipt containing detailed information about a completed transaction.
+    Represents a Solana transaction receipt containing detailed information about a
+    confirmed transaction.
 
-    This class extends BlockchainTransactionReceipt to provide Solana-specific transaction receipt handling.
-    It includes information such as transaction status, block details, and fee information.
+    This class extends BlockchainTransactionReceipt to provide Solana-specific
+    transaction receipt handling. It is built from the solders
+    EncodedConfirmedTransactionWithStatusMeta returned by the getTransaction RPC.
 
     Attributes:
         transaction_id (SolanaTransactionSignature): The unique signature of the transaction
@@ -38,50 +40,80 @@ class SolanaTransactionReceipt(BlockchainTransactionReceipt):
         post_token_balances (list[Any] | None): Token balances after the transaction
         logs (list[str] | None): Program log messages
         rewards (list[Any] | None): Rewards issued by this transaction
-        status (TransactionStatus): The status of the transaction
+        compute_units_consumed (int | None): Compute units consumed by the transaction
     """
 
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
     transaction_id: SolanaTransactionSignature
     slot: int
-    block_time: int | None
-    err: Any | None
-    fee: int
-    pre_balances: list[int]
-    post_balances: list[int]
-    pre_token_balances: list[Any] | None
-    post_token_balances: list[Any] | None
-    logs: list[str] | None
-    rewards: list[Any] | None
-    status: TransactionStatus
+    block_time: int | None = None
+    err: Any | None = None
+    fee: int = 0
+    pre_balances: list[int] = []
+    post_balances: list[int] = []
+    pre_token_balances: list[Any] | None = None
+    post_token_balances: list[Any] | None = None
+    logs: list[str] | None = None
+    rewards: list[Any] | None = None
+    compute_units_consumed: int | None = None
 
     @classmethod
-    def from_raw(cls, raw_transaction_receipt: dict[str, Any]) -> Self:
+    def from_raw(
+        cls,
+        raw_transaction: EncodedConfirmedTransactionWithStatusMeta,
+        transaction_id: SolanaTransactionSignature | None = None,
+    ) -> Self:
         """
-        Creates a SolanaTransactionReceipt instance from raw transaction receipt data.
+        Creates a SolanaTransactionReceipt from a getTransaction RPC result.
 
         Args:
-            raw_transaction_receipt (dict[str, Any]): Raw transaction receipt data from the blockchain
+            raw_transaction (EncodedConfirmedTransactionWithStatusMeta): The
+                confirmed transaction (with status meta) returned by the RPC
+            transaction_id (SolanaTransactionSignature | None): The transaction
+                signature; extracted from the encoded transaction when omitted
 
         Returns:
             Self: A new instance of SolanaTransactionReceipt
+
+        Raises:
+            ValueError: If no transaction_id is given and the encoded
+                transaction carries no signatures
         """
+        encoded = raw_transaction.transaction
+
+        if transaction_id is None:
+            signatures: list[Signature] = list(encoded.transaction.signatures)
+            if not signatures:
+                raise ValueError("Encoded transaction carries no signatures")
+            transaction_id = SolanaTransactionSignature.from_raw(signatures[0])
+
+        meta = encoded.meta
+        if meta is None:
+            # Very old ledger entries may miss status metadata entirely
+            return cls(
+                transaction_id=transaction_id,
+                slot=raw_transaction.slot,
+                block_time=raw_transaction.block_time,
+            )
+
         return cls(
-            transaction_id=SolanaTransactionSignature.from_raw(
-                raw_transaction_receipt["signature"]
-            ),
-            slot=raw_transaction_receipt["slot"],
-            block_time=raw_transaction_receipt.get("blockTime"),
-            err=raw_transaction_receipt.get("err"),
-            fee=raw_transaction_receipt["fee"],
-            pre_balances=raw_transaction_receipt["preBalances"],
-            post_balances=raw_transaction_receipt["postBalances"],
-            pre_token_balances=raw_transaction_receipt.get("preTokenBalances"),
-            post_token_balances=raw_transaction_receipt.get("postTokenBalances"),
-            logs=raw_transaction_receipt.get("logs"),
-            rewards=raw_transaction_receipt.get("rewards"),
-            status=raw_transaction_receipt["status"],
+            transaction_id=transaction_id,
+            slot=raw_transaction.slot,
+            block_time=raw_transaction.block_time,
+            err=meta.err,
+            fee=meta.fee,
+            pre_balances=list(meta.pre_balances),
+            post_balances=list(meta.post_balances),
+            pre_token_balances=list(meta.pre_token_balances)
+            if meta.pre_token_balances is not None
+            else None,
+            post_token_balances=list(meta.post_token_balances)
+            if meta.post_token_balances is not None
+            else None,
+            logs=list(meta.log_messages) if meta.log_messages is not None else None,
+            rewards=list(meta.rewards) if meta.rewards is not None else None,
+            compute_units_consumed=meta.compute_units_consumed,
         )
 
     @property
@@ -136,7 +168,7 @@ class SolanaRawTransaction(BaseModel):
 
         return cls(
             message=message,
-            signatures=raw_transaction.signatures,
+            signatures=list(raw_transaction.signatures),
             recent_blockhash=message.recent_blockhash,
             fee_payer=fee_payer,
             is_versioned=isinstance(raw_transaction, VersionedTransaction),
@@ -198,11 +230,14 @@ class SolanaTransaction(BlockchainTransaction):
         Checks if the transaction is signed.
 
         Returns:
-            bool: True if the transaction is signed, False otherwise
+            bool: True if the transaction carries at least one real
+                (non-default) signature, False otherwise
         """
-        return (
-            self.signed_transaction is not None
-            and len(self.signed_transaction.signatures) > 0
+        if self.signed_transaction is None:
+            return False
+        return any(
+            signature != Signature.default()
+            for signature in self.signed_transaction.signatures
         )
 
     def process_receipt(self, receipt: SolanaTransactionReceipt) -> bool:

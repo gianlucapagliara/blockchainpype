@@ -3,8 +3,11 @@ This package provides interfaces for interacting with money market protocols lik
 It includes base classes for lending, borrowing, and market data management.
 """
 
+# Re-exported for backward compatibility: the real financepype asset class
+# (this package previously exported a mock placeholder under the same name).
+from financepype.assets.blockchain import BlockchainAsset
+
 from .models import (
-    BlockchainAsset,
     BorrowingPosition,
     CollateralMode,
     InterestRateMode,

@@ -6,6 +6,7 @@ that extends the eth-account's LocalAccount functionality.
 
 from eth_account import Account
 from eth_account.signers.local import LocalAccount
+from eth_keys.datatypes import PrivateKey
 from pydantic import BaseModel, SecretStr
 
 
@@ -33,6 +34,9 @@ class EthereumSigner(LocalAccount):
 
     Args:
         configuration (EthereumSignerConfiguration): Configuration containing the private key
+
+    Raises:
+        ValueError: If the configured private key is malformed
     """
 
     def __init__(self, configuration: EthereumSignerConfiguration):
@@ -43,5 +47,8 @@ class EthereumSigner(LocalAccount):
             configuration (EthereumSignerConfiguration): Configuration containing the private key
                 used for transaction signing
         """
-        key = Account._parse_private_key(configuration.private_key.get_secret_value())
-        super().__init__(key, account=Account())
+        # Account.from_key is the public parsing/validation entry point (it
+        # accepts hex strings, bytes and ints); LocalAccount.__init__ itself
+        # requires an eth_keys PrivateKey instance.
+        parsed = Account.from_key(configuration.private_key.get_secret_value())
+        super().__init__(PrivateKey(bytes(parsed.key)), account=Account())

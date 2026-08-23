@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 import pytest
 from financepype.platforms.blockchain import BlockchainPlatform
 
@@ -89,3 +91,69 @@ def test_ethereum_address_validation() -> None:
     # Invalid address
     with pytest.raises(ValueError):
         EthereumAddress.from_string("0xinvalid")
+
+
+def test_ethereum_asset_is_abstract() -> None:
+    """EthereumAsset cannot be instantiated without initialize_data."""
+    platform = BlockchainPlatform(
+        identifier="ethereum",
+        type=EthereumBlockchainType,
+        chain_id=1,
+    )
+    address = EthereumAddress.from_string("0x1234567890123456789012345678901234567890")
+
+    with pytest.raises(TypeError, match="abstract"):
+        EthereumAsset(platform=platform, identifier=address)  # type: ignore[abstract]
+
+
+def test_asset_conversion_helpers() -> None:
+    """convert_to_raw/convert_to_decimals use the asset decimals exactly."""
+    platform = BlockchainPlatform(
+        identifier="ethereum",
+        type=EthereumBlockchainType,
+        chain_id=1,
+    )
+    asset = MockEthereumAsset(
+        platform=platform,
+        identifier=EthereumAddress.from_string(
+            "0x1234567890123456789012345678901234567890"
+        ),
+        data=EthereumAssetData(name="Test Token", symbol="TEST", decimals=6),
+    )
+
+    assert asset.convert_to_raw(Decimal("1.5")) == 1_500_000
+    assert asset.convert_to_decimals(1_500_000) == Decimal("1.5")
+    assert asset.convert_to_decimals(1) == Decimal("0.000001")
+
+
+def test_asset_conversion_requires_initialized_data() -> None:
+    """Conversions on an uninitialized asset raise a clear error, not AttributeError."""
+    platform = BlockchainPlatform(
+        identifier="ethereum",
+        type=EthereumBlockchainType,
+        chain_id=1,
+    )
+    asset = MockEthereumAsset(
+        platform=platform,
+        identifier=EthereumAddress.from_string(
+            "0x1234567890123456789012345678901234567890"
+        ),
+    )
+    assert asset.data is None
+
+    with pytest.raises(ValueError, match="not initialized"):
+        asset.convert_to_raw(Decimal("1"))
+    with pytest.raises(ValueError, match="not initialized"):
+        asset.convert_to_decimals(1)
+
+
+async def test_native_asset_initialize_data_is_noop() -> None:
+    platform = BlockchainPlatform(
+        identifier="ethereum",
+        type=EthereumBlockchainType,
+        chain_id=1,
+    )
+    native_asset = EthereumNativeAsset(platform=platform)
+    await native_asset.initialize_data()
+    assert native_asset.data.decimals == 18
+    assert native_asset.convert_to_decimals(10**18) == Decimal(1)

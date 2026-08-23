@@ -2,15 +2,9 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Self
 
+from financepype.assets.blockchain import BlockchainAsset
 from financepype.operators.dapps.dapp import DecentralizedApplicationConfiguration
-from pydantic import BaseModel, ConfigDict, model_validator
-
-
-# Mock BlockchainAsset for testing purposes
-class BlockchainAsset:
-    """Mock blockchain asset class."""
-
-    pass
+from pydantic import BaseModel, model_validator
 
 
 class InterestRateMode(StrEnum):
@@ -61,8 +55,6 @@ class MoneyMarketConfiguration(DecentralizedApplicationConfiguration):
 class LendingPosition(BaseModel):
     """Represents a lending position in a money market."""
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
     asset: BlockchainAsset
     supplied_amount: Decimal
     accrued_interest: Decimal
@@ -84,8 +76,6 @@ class LendingPosition(BaseModel):
 class BorrowingPosition(BaseModel):
     """Represents a borrowing position in a money market."""
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
     asset: BlockchainAsset
     borrowed_amount: Decimal
     accrued_interest: Decimal
@@ -101,8 +91,6 @@ class BorrowingPosition(BaseModel):
 
 class MarketData(BaseModel):
     """Market data for a specific asset in a money market protocol."""
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     asset: BlockchainAsset
     supply_apy: Decimal

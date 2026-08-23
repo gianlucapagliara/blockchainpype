@@ -11,7 +11,6 @@ from typing import Any
 from ens import AsyncENS
 from financepype.operators.blockchains.models import BlockchainConfiguration
 from pydantic import BaseModel, ConfigDict, Field
-from web3 import WebSocketProvider
 from web3.module import Module
 from web3.providers.async_base import AsyncJSONBaseProvider
 
@@ -28,13 +27,15 @@ class EthereumConnectivityConfiguration(BaseModel):
     Configuration for Ethereum network connectivity.
 
     This class defines the connection settings for interacting with Ethereum networks,
-    including RPC and WebSocket providers, ENS support, and middleware configuration.
+    including the RPC provider, ENS support, and middleware configuration.
 
     Attributes:
         rpc_provider (AsyncJSONBaseProvider): Async JSON-RPC provider for blockchain interaction
-        ws_provider (WebSocketProvider | None): Optional WebSocket provider for real-time events
-        ens (AsyncENS | None): Optional Ethereum Name Service integration
-        middleware (list[Any]): List of Web3.py middleware to apply
+        ens (AsyncENS | None): Optional Ethereum Name Service integration, bound
+            to the Web3 instance when provided
+        middleware (list[Any] | None): Web3.py middleware to apply. None (the
+            default) preserves the Web3 default middleware stack; an explicit
+            list (including an empty one) replaces it entirely
         modules (dict[str, type[Module] | Sequence[Any]] | None): Optional Web3 modules to load
         external_modules (dict[str, type[Module] | Sequence[Any]] | None): Optional external modules
     """
@@ -42,9 +43,8 @@ class EthereumConnectivityConfiguration(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     rpc_provider: AsyncJSONBaseProvider
-    ws_provider: WebSocketProvider | None = None
     ens: AsyncENS | None = None
-    middleware: list[Any] = Field(default_factory=lambda: [])
+    middleware: list[Any] | None = None
     modules: dict[str, type[Module] | Sequence[Any]] | None = None
     external_modules: dict[str, type[Module] | Sequence[Any]] | None = None
 

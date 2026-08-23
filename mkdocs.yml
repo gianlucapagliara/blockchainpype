@@ -26,3 +26,9 @@ markdown_extensions:
 
 nav:
   - Home: index.md
+  - Quickstart: quickstart.md
+  - Guides:
+      - EVM: guides/evm.md
+      - Solana: guides/solana.md
+      - DApps: guides/dapps.md
+      - Testing: guides/testing.md

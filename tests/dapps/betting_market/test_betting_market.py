@@ -2,54 +2,52 @@
 Unit tests for base BettingMarket class.
 
 This module tests:
-- BettingMarket initialization and configuration
-- Protocol strategy management
-- Core operation methods
+- BettingMarket initialization, abstract contract and configuration
+- Protocol strategy dispatch (named, first-available and aggregation)
+- Trading operations delegating to the strategies (incl. slippage defaults)
 - Error handling and validation
 """
 
 from decimal import Decimal
-from unittest.mock import MagicMock
 
 import pytest
+from financepype.owners.wallet import BlockchainWallet
+from financepype.platforms.blockchain import BlockchainPlatform
 
 from blockchainpype.dapps.betting_market import (
+    MAX_DERIVED_OUTCOME_PRICE,
+    MIN_DERIVED_OUTCOME_PRICE,
     BettingMarketConfiguration,
     BettingMarketDApp,
     BettingMarketModel,
     BettingPosition,
     MarketStatus,
-    OutcomeToken,
     ProtocolConfiguration,
+    ProtocolImplementation,
 )
-from blockchainpype.initializer import BlockchainsInitializer
+from tests.dapps.helpers import FIXED_TIMESTAMP, StubTransaction, make_transaction
 
-# Initialize blockchain configurations for tests
-try:
-    BlockchainsInitializer.configure()
-except ValueError:
-    # Configuration already registered
-    pass
+USER_ADDRESS = "0x1234567890123456789012345678901234567890"
 
 
-class MockBlockchainAsset:
-    """Mock blockchain asset for testing."""
+class StubProtocolImplementation:
+    """Stub protocol implementation recording calls and returning real models."""
 
-    def __init__(self, symbol: str, decimals: int):
-        self.symbol = symbol
-        self.decimals = decimals
-
-
-class MockProtocolImplementation:
-    """Mock protocol implementation for testing."""
-
-    def __init__(self, protocol_name: str):
+    def __init__(self, protocol_name: str, platform: BlockchainPlatform):
         self.protocol_name = protocol_name
-        self._markets = {}
-        self._positions = {}
+        self.platform = platform
+        self.token_price = Decimal("0.65")
+        self.wallet: BlockchainWallet | None = None
+        self._markets: dict[str, BettingMarketModel] = {}
+        self._positions: dict[str, list[BettingPosition]] = {}
+        self.buy_calls: list[tuple] = []
+        self.sell_calls: list[tuple] = []
+        self.redeem_calls: list[tuple] = []
+
+    def set_wallet(self, wallet: BlockchainWallet | None) -> None:
+        self.wallet = wallet
 
     async def get_market(self, market_id: str) -> BettingMarketModel:
-        """Mock get market method."""
         if market_id not in self._markets:
             raise ValueError(f"Market {market_id} not found")
         return self._markets[market_id]
@@ -61,7 +59,6 @@ class MockProtocolImplementation:
         limit: int = 100,
         offset: int = 0,
     ) -> list[BettingMarketModel]:
-        """Mock get markets method."""
         return list(self._markets.values())
 
     async def get_user_positions(
@@ -69,7 +66,6 @@ class MockProtocolImplementation:
         user_address: str,
         market_id: str | None = None,
     ) -> list[BettingPosition]:
-        """Mock get user positions method."""
         return self._positions.get(user_address, [])
 
     async def get_outcome_token_price(
@@ -77,20 +73,41 @@ class MockProtocolImplementation:
         market_id: str,
         outcome_token_id: str,
     ) -> Decimal:
-        """Mock get outcome token price method."""
-        return Decimal("0.65")
+        return self.token_price
 
-    async def build_buy_transaction(self, *args, **kwargs):
-        """Mock build buy transaction method."""
-        return MagicMock()
+    async def build_buy_transaction(
+        self,
+        market_id: str,
+        outcome_token_id: str,
+        amount: Decimal,
+        max_price: Decimal,
+        user_address: str,
+    ) -> StubTransaction:
+        self.buy_calls.append(
+            (market_id, outcome_token_id, amount, max_price, user_address)
+        )
+        return make_transaction(self.platform)
 
-    async def build_sell_transaction(self, *args, **kwargs):
-        """Mock build sell transaction method."""
-        return MagicMock()
+    async def build_sell_transaction(
+        self,
+        market_id: str,
+        outcome_token_id: str,
+        shares: Decimal,
+        min_price: Decimal,
+        user_address: str,
+    ) -> StubTransaction:
+        self.sell_calls.append(
+            (market_id, outcome_token_id, shares, min_price, user_address)
+        )
+        return make_transaction(self.platform)
 
-    async def build_redeem_transaction(self, *args, **kwargs):
-        """Mock build redeem transaction method."""
-        return MagicMock()
+    async def build_redeem_transaction(
+        self,
+        market_id: str,
+        user_address: str,
+    ) -> StubTransaction:
+        self.redeem_calls.append((market_id, user_address))
+        return make_transaction(self.platform)
 
     async def calculate_buy_quote(
         self,
@@ -98,12 +115,9 @@ class MockProtocolImplementation:
         outcome_token_id: str,
         amount: Decimal,
     ) -> tuple[Decimal, Decimal]:
-        """Mock calculate buy quote method."""
-        price = Decimal("0.65")
-        expected_shares = amount / price
+        expected_shares = amount / self.token_price
         fee = amount * Decimal("0.02")
-        total_cost = amount + fee
-        return expected_shares, total_cost
+        return expected_shares, amount + fee
 
     async def calculate_sell_quote(
         self,
@@ -111,36 +125,29 @@ class MockProtocolImplementation:
         outcome_token_id: str,
         shares: Decimal,
     ) -> tuple[Decimal, Decimal]:
-        """Mock calculate sell quote method."""
-        price = Decimal("0.65")
-        gross_payout = shares * price
+        gross_payout = shares * self.token_price
         fee = gross_payout * Decimal("0.02")
-        net_payout = gross_payout - fee
-        return net_payout, fee
+        return gross_payout - fee, fee
 
-    def add_mock_market(self, market: BettingMarketModel):
-        """Add a mock market for testing."""
+    def add_mock_market(self, market: BettingMarketModel) -> None:
         self._markets[market.market_id] = market
 
-    def add_mock_positions(self, user_address: str, positions: list[BettingPosition]):
-        """Add mock positions for testing."""
+    def add_mock_positions(
+        self, user_address: str, positions: list[BettingPosition]
+    ) -> None:
         self._positions[user_address] = positions
 
 
-class MockBettingMarket(BettingMarketDApp):
-    """Test implementation of BettingMarket for testing."""
+class StubBettingMarket(BettingMarketDApp):
+    """Concrete BettingMarket wiring one stub strategy per configured protocol."""
 
     def _initialize_protocols(self) -> None:
-        """Initialize test protocol strategies."""
         for protocol_config in self.configuration.protocols:
-            mock_impl = MockProtocolImplementation(protocol_config.protocol_name)
-            self._protocol_strategies[protocol_config.protocol_name] = mock_impl
-
-
-@pytest.fixture
-def usdc_asset():
-    """Create a mock USDC asset."""
-    return MockBlockchainAsset("USDC", 6)
+            self._protocol_strategies[protocol_config.protocol_name] = (
+                StubProtocolImplementation(
+                    protocol_config.protocol_name, self.configuration.platform
+                )
+            )
 
 
 @pytest.fixture
@@ -154,10 +161,10 @@ def test_protocol_config():
 
 
 @pytest.fixture
-def betting_market_config(test_protocol_config, test_platform):
+def betting_market_config(test_protocol_config, dapp_platform):
     """Create a test betting market configuration."""
     return BettingMarketConfiguration(
-        platform=test_platform,
+        platform=dapp_platform,
         protocols=[test_protocol_config],
         default_slippage_tolerance=Decimal("0.01"),
     )
@@ -166,130 +173,77 @@ def betting_market_config(test_protocol_config, test_platform):
 @pytest.fixture
 def betting_market(betting_market_config):
     """Create a test betting market instance."""
-    return MockBettingMarket(betting_market_config)
+    return StubBettingMarket(betting_market_config)
 
 
 @pytest.fixture
-def sample_market():
-    """Create a sample betting market for testing."""
-    from datetime import datetime, timedelta
-
-    from blockchainpype.dapps.betting_market import MarketOutcome
-    from blockchainpype.dapps.betting_market.models import BlockchainAsset
-
-    # Create proper BlockchainAsset instance
-    class TestBlockchainAsset(BlockchainAsset):
-        def __init__(self, symbol: str, decimals: int):
-            super().__init__()
-            self.symbol = symbol
-            self.decimals = decimals
-
-    usdc_asset = TestBlockchainAsset("USDC", 6)
-
-    yes_token = OutcomeToken(
-        token_id="yes_token_1",
-        outcome_name="Yes",
-        current_price=Decimal("0.65"),
-        total_supply=Decimal("10000"),
-        probability=Decimal("0.65"),
-    )
-
-    no_token = OutcomeToken(
-        token_id="no_token_1",
-        outcome_name="No",
-        current_price=Decimal("0.35"),
-        total_supply=Decimal("5000"),
-        probability=Decimal("0.35"),
-    )
-
-    yes_outcome = MarketOutcome(
-        outcome_id="outcome_yes",
-        outcome_text="Yes",
-        outcome_tokens=[yes_token],
-    )
-
-    no_outcome = MarketOutcome(
-        outcome_id="outcome_no",
-        outcome_text="No",
-        outcome_tokens=[no_token],
-    )
-
-    return BettingMarketModel(
-        market_id="test_market_1",
-        title="Test Market",
-        description="A test betting market",
-        category="test",
-        status=MarketStatus.ACTIVE,
-        collateral_asset=usdc_asset,
-        outcomes=[yes_outcome, no_outcome],
-        total_volume=Decimal("50000"),
-        total_liquidity=Decimal("25000"),
-        creation_date=datetime.now(),
-        end_date=datetime.now() + timedelta(days=30),
-        protocol="Test Protocol",
-    )
+def stub_strategy(betting_market) -> StubProtocolImplementation:
+    """The single wired stub strategy."""
+    return betting_market._protocol_strategies["Test Protocol"]
 
 
 class TestBettingMarketInitialization:
     """Test BettingMarket initialization and configuration."""
 
+    def test_abstract_base_cannot_be_instantiated(self, betting_market_config):
+        """BettingMarket must be a real ABC enforcing _initialize_protocols."""
+        with pytest.raises(TypeError, match="_initialize_protocols"):
+            BettingMarketDApp(betting_market_config)
+
     def test_initialization(self, betting_market_config):
         """Test BettingMarket initialization."""
-        betting_market = MockBettingMarket(betting_market_config)
+        betting_market = StubBettingMarket(betting_market_config)
 
         assert betting_market.configuration == betting_market_config
         assert len(betting_market.supported_protocols) == 1
         assert "Test Protocol" in betting_market.supported_protocols
 
-    def test_empty_protocols_configuration(self, test_platform):
+    def test_empty_protocols_configuration(self, dapp_platform):
         """Test error when no protocols are configured."""
-        config = BettingMarketConfiguration(platform=test_platform, protocols=[])
-        betting_market = MockBettingMarket(config)
+        config = BettingMarketConfiguration(platform=dapp_platform, protocols=[])
+        betting_market = StubBettingMarket(config)
 
         with pytest.raises(ValueError, match="No protocols configured"):
             betting_market._get_protocol_implementation(None)
+
+    def test_current_timestamp_from_blockchain(self, betting_market):
+        """current_timestamp must delegate to the resolved blockchain."""
+        assert betting_market.current_timestamp == FIXED_TIMESTAMP
 
 
 class TestMarketOperations:
     """Test market-related operations."""
 
-    @pytest.mark.asyncio
-    async def test_get_market(self, betting_market, sample_market):
+    async def test_get_market(self, betting_market, stub_strategy, sample_market):
         """Test getting a specific market."""
-        # Add mock market to the protocol
-        protocol = list(betting_market._protocol_strategies.values())[0]
-        protocol.add_mock_market(sample_market)
+        stub_strategy.add_mock_market(sample_market)
 
         market = await betting_market.get_market("test_market_1")
 
         assert market.market_id == "test_market_1"
         assert market.title == "Test Market"
         assert market.status == MarketStatus.ACTIVE
+        assert market.collateral_asset.data.symbol == "USDC"
 
-    @pytest.mark.asyncio
     async def test_get_market_not_found(self, betting_market):
         """Test getting a non-existent market."""
         with pytest.raises(ValueError, match="Market nonexistent not found"):
             await betting_market.get_market("nonexistent")
 
-    @pytest.mark.asyncio
-    async def test_get_markets(self, betting_market, sample_market):
+    async def test_get_markets(self, betting_market, stub_strategy, sample_market):
         """Test getting all markets."""
-        # Add mock market to the protocol
-        protocol = list(betting_market._protocol_strategies.values())[0]
-        protocol.add_mock_market(sample_market)
+        stub_strategy.add_mock_market(sample_market)
 
         markets = await betting_market.get_markets()
 
         assert len(markets) == 1
         assert markets[0].market_id == "test_market_1"
 
-    @pytest.mark.asyncio
-    async def test_get_markets_with_filters(self, betting_market, sample_market):
+    async def test_get_markets_with_filters(
+        self, betting_market, stub_strategy, sample_market
+    ):
         """Test getting markets with filters."""
-        # Add mock market to the protocol
-        protocol = list(betting_market._protocol_strategies.values())[0]
-        protocol.add_mock_market(sample_market)
+        stub_strategy.add_mock_market(sample_market)
 
         markets = await betting_market.get_markets(
             category="test", status="active", limit=10
@@ -297,20 +251,48 @@ class TestMarketOperations:
 
         assert len(markets) == 1
 
+    async def test_get_markets_aggregates_protocols(self, dapp_platform, sample_market):
+        """Markets must be aggregated from every configured protocol."""
+        config = BettingMarketConfiguration(
+            platform=dapp_platform,
+            protocols=[
+                ProtocolConfiguration(
+                    protocol_name="Protocol A",
+                    contract_address="0x1111111111111111111111111111111111111111",
+                ),
+                ProtocolConfiguration(
+                    protocol_name="Protocol B",
+                    contract_address="0x2222222222222222222222222222222222222222",
+                ),
+            ],
+        )
+        betting_market = StubBettingMarket(config)
+        betting_market._protocol_strategies["Protocol A"].add_mock_market(sample_market)
+        second_market = sample_market.model_copy(
+            update={"market_id": "test_market_2", "protocol": "Protocol B"}
+        )
+        betting_market._protocol_strategies["Protocol B"].add_mock_market(second_market)
+
+        markets = await betting_market.get_markets()
+
+        assert {market.market_id for market in markets} == {
+            "test_market_1",
+            "test_market_2",
+        }
+
 
 class TestPositionOperations:
     """Test position-related operations."""
 
-    @pytest.mark.asyncio
     async def test_get_user_positions_empty(self, betting_market):
         """Test getting positions for user with no positions."""
-        positions = await betting_market.get_user_positions("0x123")
+        positions = await betting_market.get_user_positions(USER_ADDRESS)
         assert len(positions) == 0
 
-    @pytest.mark.asyncio
-    async def test_get_user_positions_with_data(self, betting_market, sample_market):
+    async def test_get_user_positions_with_data(
+        self, betting_market, stub_strategy, sample_market
+    ):
         """Test getting positions for user with positions."""
-        # Create mock position
         outcome_token = sample_market.outcomes[0].outcome_tokens[0]
         position = BettingPosition(
             market_id="test_market_1",
@@ -322,12 +304,9 @@ class TestPositionOperations:
             unrealized_pnl=Decimal("10"),
             protocol="Test Protocol",
         )
+        stub_strategy.add_mock_positions(USER_ADDRESS, [position])
 
-        # Add mock positions to the protocol
-        protocol = list(betting_market._protocol_strategies.values())[0]
-        protocol.add_mock_positions("0x123", [position])
-
-        positions = await betting_market.get_user_positions("0x123")
+        positions = await betting_market.get_user_positions(USER_ADDRESS)
 
         assert len(positions) == 1
         assert positions[0].market_id == "test_market_1"
@@ -337,7 +316,6 @@ class TestPositionOperations:
 class TestPricingOperations:
     """Test pricing-related operations."""
 
-    @pytest.mark.asyncio
     async def test_get_outcome_token_price(self, betting_market):
         """Test getting outcome token price."""
         price = await betting_market.get_outcome_token_price(
@@ -346,95 +324,241 @@ class TestPricingOperations:
 
         assert price == Decimal("0.65")
 
-    @pytest.mark.asyncio
     async def test_get_buy_quote(self, betting_market):
         """Test getting buy quote."""
         expected_shares, total_cost = await betting_market.get_buy_quote(
             "test_market_1", "yes_token_1", Decimal("100")
         )
 
-        # Based on mock implementation: shares = 100/0.65, cost = 100 + 2% fee
         assert expected_shares == Decimal("100") / Decimal("0.65")
         assert total_cost == Decimal("102")  # 100 + 2% fee
 
-    @pytest.mark.asyncio
     async def test_get_sell_quote(self, betting_market):
         """Test getting sell quote."""
         net_payout, fees = await betting_market.get_sell_quote(
             "test_market_1", "yes_token_1", Decimal("100")
         )
 
-        # Based on mock implementation: payout = 100 * 0.65 = 65, fee = 65 * 0.02 = 1.3
         gross_payout = Decimal("100") * Decimal("0.65")
         expected_fee = gross_payout * Decimal("0.02")
-        expected_net = gross_payout - expected_fee
 
-        assert net_payout == expected_net
+        assert net_payout == gross_payout - expected_fee
         assert fees == expected_fee
 
 
 class TestTradingOperations:
     """Test trading-related operations."""
 
-    @pytest.mark.asyncio
-    async def test_buy_outcome_tokens(self, betting_market):
-        """Test buying outcome tokens."""
+    async def test_buy_outcome_tokens_applies_default_slippage(
+        self, betting_market, stub_strategy
+    ):
+        """Without max_price, current price plus slippage must be forwarded."""
+        stub_strategy.token_price = Decimal("0.60")
+
         transaction = await betting_market.buy_outcome_tokens(
             market_id="test_market_1",
             outcome_token_id="yes_token_1",
             amount=Decimal("100"),
-            user_address="0x123",
+            user_address=USER_ADDRESS,
         )
 
-        assert transaction is not None
+        assert isinstance(transaction, StubTransaction)
+        # 0.60 * (1 + 1% slippage) = 0.606
+        assert stub_strategy.buy_calls == [
+            (
+                "test_market_1",
+                "yes_token_1",
+                Decimal("100"),
+                Decimal("0.60") * (1 + Decimal("0.01")),
+                USER_ADDRESS,
+            )
+        ]
 
-    @pytest.mark.asyncio
-    async def test_buy_outcome_tokens_with_max_price(self, betting_market):
-        """Test buying outcome tokens with specified max price."""
+    async def test_buy_outcome_tokens_with_max_price(
+        self, betting_market, stub_strategy
+    ):
+        """An explicit max price must be forwarded untouched."""
         transaction = await betting_market.buy_outcome_tokens(
             market_id="test_market_1",
             outcome_token_id="yes_token_1",
             amount=Decimal("100"),
-            user_address="0x123",
+            user_address=USER_ADDRESS,
             max_price=Decimal("0.70"),
         )
 
-        assert transaction is not None
+        assert isinstance(transaction, StubTransaction)
+        assert stub_strategy.buy_calls[0][3] == Decimal("0.70")
 
-    @pytest.mark.asyncio
-    async def test_sell_outcome_tokens(self, betting_market):
-        """Test selling outcome tokens."""
+    async def test_sell_outcome_tokens_applies_default_slippage(
+        self, betting_market, stub_strategy
+    ):
+        """Without min_price, current price minus slippage must be forwarded."""
+        stub_strategy.token_price = Decimal("0.60")
+
         transaction = await betting_market.sell_outcome_tokens(
             market_id="test_market_1",
             outcome_token_id="yes_token_1",
             shares=Decimal("50"),
-            user_address="0x123",
+            user_address=USER_ADDRESS,
         )
 
-        assert transaction is not None
+        assert isinstance(transaction, StubTransaction)
+        # 0.60 * (1 - 1% slippage) = 0.594
+        assert stub_strategy.sell_calls == [
+            (
+                "test_market_1",
+                "yes_token_1",
+                Decimal("50"),
+                Decimal("0.60") * (1 - Decimal("0.01")),
+                USER_ADDRESS,
+            )
+        ]
 
-    @pytest.mark.asyncio
-    async def test_sell_outcome_tokens_with_min_price(self, betting_market):
-        """Test selling outcome tokens with specified min price."""
+    async def test_sell_outcome_tokens_with_min_price(
+        self, betting_market, stub_strategy
+    ):
+        """An explicit min price must be forwarded untouched."""
         transaction = await betting_market.sell_outcome_tokens(
             market_id="test_market_1",
             outcome_token_id="yes_token_1",
             shares=Decimal("50"),
-            user_address="0x123",
+            user_address=USER_ADDRESS,
             min_price=Decimal("0.60"),
         )
 
-        assert transaction is not None
+        assert isinstance(transaction, StubTransaction)
+        assert stub_strategy.sell_calls[0][3] == Decimal("0.60")
 
-    @pytest.mark.asyncio
-    async def test_redeem_winnings(self, betting_market):
+    async def test_redeem_winnings(self, betting_market, stub_strategy):
         """Test redeeming winnings."""
         transaction = await betting_market.redeem_winnings(
             market_id="test_market_1",
-            user_address="0x123",
+            user_address=USER_ADDRESS,
         )
 
-        assert transaction is not None
+        assert isinstance(transaction, StubTransaction)
+        assert stub_strategy.redeem_calls == [("test_market_1", USER_ADDRESS)]
+
+
+class TestDerivedPriceClamping:
+    """Derived max/min prices must stay inside the (0, 1) probability range."""
+
+    @pytest.fixture
+    def wide_slippage_market(self, test_protocol_config, dapp_platform):
+        """A 5% slippage tolerance, enough to push 0.99 above 1.0."""
+        return StubBettingMarket(
+            BettingMarketConfiguration(
+                platform=dapp_platform,
+                protocols=[test_protocol_config],
+                default_slippage_tolerance=Decimal("0.05"),
+            )
+        )
+
+    async def test_high_probability_buy_clamps_max_price(self, wide_slippage_market):
+        """Regression: 0.99 * 1.05 = 1.0395 was forwarded and rejected."""
+        strategy = wide_slippage_market._protocol_strategies["Test Protocol"]
+        strategy.token_price = Decimal("0.99")
+
+        transaction = await wide_slippage_market.buy_outcome_tokens(
+            market_id="test_market_1",
+            outcome_token_id="yes_token_1",
+            amount=Decimal("100"),
+            user_address=USER_ADDRESS,
+        )
+
+        assert isinstance(transaction, StubTransaction)
+        forwarded_max_price = strategy.buy_calls[0][3]
+        assert forwarded_max_price == MAX_DERIVED_OUTCOME_PRICE
+        assert forwarded_max_price == Decimal("0.999")
+        assert Decimal(0) < forwarded_max_price < Decimal(1)
+
+    async def test_buy_below_the_clamp_is_untouched(self, wide_slippage_market):
+        strategy = wide_slippage_market._protocol_strategies["Test Protocol"]
+        strategy.token_price = Decimal("0.50")
+
+        await wide_slippage_market.buy_outcome_tokens(
+            market_id="test_market_1",
+            outcome_token_id="yes_token_1",
+            amount=Decimal("100"),
+            user_address=USER_ADDRESS,
+        )
+
+        assert strategy.buy_calls[0][3] == Decimal("0.525")
+
+    async def test_explicit_max_price_is_not_clamped(self, wide_slippage_market):
+        """An explicit caller value is forwarded untouched, even above 1."""
+        strategy = wide_slippage_market._protocol_strategies["Test Protocol"]
+
+        await wide_slippage_market.buy_outcome_tokens(
+            market_id="test_market_1",
+            outcome_token_id="yes_token_1",
+            amount=Decimal("100"),
+            user_address=USER_ADDRESS,
+            max_price=Decimal("1.5"),
+        )
+
+        assert strategy.buy_calls[0][3] == Decimal("1.5")
+
+    async def test_low_probability_sell_clamps_min_price(self, wide_slippage_market):
+        """The mirror clamp: a near-zero price must stay strictly positive."""
+        strategy = wide_slippage_market._protocol_strategies["Test Protocol"]
+        strategy.token_price = Decimal("0")
+
+        await wide_slippage_market.sell_outcome_tokens(
+            market_id="test_market_1",
+            outcome_token_id="yes_token_1",
+            shares=Decimal("50"),
+            user_address=USER_ADDRESS,
+        )
+
+        forwarded_min_price = strategy.sell_calls[0][3]
+        assert forwarded_min_price == MIN_DERIVED_OUTCOME_PRICE
+        assert forwarded_min_price == Decimal("0.001")
+
+    async def test_sell_above_the_clamp_is_untouched(self, wide_slippage_market):
+        strategy = wide_slippage_market._protocol_strategies["Test Protocol"]
+        strategy.token_price = Decimal("0.50")
+
+        await wide_slippage_market.sell_outcome_tokens(
+            market_id="test_market_1",
+            outcome_token_id="yes_token_1",
+            shares=Decimal("50"),
+            user_address=USER_ADDRESS,
+        )
+
+        assert strategy.sell_calls[0][3] == Decimal("0.475")
+
+
+class StrategyWithoutSetWallet:
+    """Every betting-market method except the wallet binding one."""
+
+    async def get_market(self, market_id): ...
+    async def get_markets(self, *args, **kwargs): ...
+    async def get_user_positions(self, *args, **kwargs): ...
+    async def get_outcome_token_price(self, *args, **kwargs): ...
+    async def build_buy_transaction(self, *args, **kwargs): ...
+    async def build_sell_transaction(self, *args, **kwargs): ...
+    async def build_redeem_transaction(self, *args, **kwargs): ...
+    async def calculate_buy_quote(self, *args, **kwargs): ...
+    async def calculate_sell_quote(self, *args, **kwargs): ...
+
+
+class TestProtocolContract:
+    """The betting-market ProtocolImplementation is a runtime-checkable contract."""
+
+    def test_protocol_is_runtime_checkable(self, stub_strategy):
+        assert isinstance(stub_strategy, ProtocolImplementation)
+
+    def test_incomplete_implementation_does_not_conform(self):
+        assert not isinstance(StrategyWithoutSetWallet(), ProtocolImplementation)
+
+    def test_set_wallet_is_part_of_the_contract(self, stub_strategy):
+        sentinel = object()
+        stub_strategy.set_wallet(sentinel)
+        assert stub_strategy.wallet is sentinel
+
+        stub_strategy.set_wallet(None)
+        assert stub_strategy.wallet is None
 
 
 class TestProtocolManagement:
@@ -458,57 +582,4 @@ class TestProtocolManagement:
     def test_supported_protocols_property(self, betting_market):
         """Test supported protocols property."""
         protocols = betting_market.supported_protocols
-        assert len(protocols) == 1
-        assert "Test Protocol" in protocols
-
-
-class TestSlippageCalculation:
-    """Test slippage tolerance calculations."""
-
-    @pytest.mark.asyncio
-    async def test_buy_with_slippage_calculation(self, betting_market):
-        """Test that buy operations calculate max price with slippage."""
-        # Mock the get_outcome_token_price method to return a known value
-        protocol = list(betting_market._protocol_strategies.values())[0]
-        original_method = protocol.get_outcome_token_price
-
-        async def mock_price(*args, **kwargs):
-            return Decimal("0.60")
-
-        protocol.get_outcome_token_price = mock_price
-
-        # The buy operation should calculate max_price as current_price * (1 + slippage)
-        # With 1% slippage: 0.60 * 1.01 = 0.606
-        await betting_market.buy_outcome_tokens(
-            market_id="test_market_1",
-            outcome_token_id="yes_token_1",
-            amount=Decimal("100"),
-            user_address="0x123",
-        )
-
-        # Restore original method
-        protocol.get_outcome_token_price = original_method
-
-    @pytest.mark.asyncio
-    async def test_sell_with_slippage_calculation(self, betting_market):
-        """Test that sell operations calculate min price with slippage."""
-        # Mock the get_outcome_token_price method to return a known value
-        protocol = list(betting_market._protocol_strategies.values())[0]
-        original_method = protocol.get_outcome_token_price
-
-        async def mock_price(*args, **kwargs):
-            return Decimal("0.60")
-
-        protocol.get_outcome_token_price = mock_price
-
-        # The sell operation should calculate min_price as current_price * (1 - slippage)
-        # With 1% slippage: 0.60 * 0.99 = 0.594
-        await betting_market.sell_outcome_tokens(
-            market_id="test_market_1",
-            outcome_token_id="yes_token_1",
-            shares=Decimal("50"),
-            user_address="0x123",
-        )
-
-        # Restore original method
-        protocol.get_outcome_token_price = original_method
+        assert protocols == ["Test Protocol"]
