@@ -18,7 +18,9 @@ Unit conventions used by Aave V3 (and converted here):
   8 decimals on Ethereum mainnet) and the health factor is wad (1e18).
 """
 
+import asyncio
 import uuid
+from collections.abc import Sequence
 from decimal import Decimal
 from typing import Self, cast
 
@@ -122,6 +124,12 @@ ACCOUNT_DATA_AVAILABLE_BORROWS_BASE = 2
 ACCOUNT_DATA_LIQUIDATION_THRESHOLD = 3
 ACCOUNT_DATA_LTV = 4
 ACCOUNT_DATA_HEALTH_FACTOR = 5
+
+#: One decoded ``getUserReserveData`` tuple, indexed by the USER_RESERVE_*
+#: constants above.
+type ReserveTuple = tuple[int | bool, ...]
+#: One enumerated reserve: ``(symbol, token_address, user_reserve_data)``.
+type UserReserveEntry = tuple[str, str, ReserveTuple]
 
 
 def ray_to_decimal(value: int) -> Decimal:
@@ -423,14 +431,18 @@ class AaveV3:
             protocol=self.protocol_config.protocol_name,
         )
 
-    async def _iter_user_reserves(
-        self, user_address: str
-    ) -> list[tuple[str, str, tuple[int | bool, ...]]]:
+    async def _iter_user_reserves(self, user_address: str) -> list[UserReserveEntry]:
         """Enumerate all reserves with the user's per-reserve data.
 
+        The reserve list costs one call; the per-reserve ``getUserReserveData``
+        lookups that follow are independent read calls, so they are issued
+        concurrently with :func:`asyncio.gather` instead of one round trip
+        after another (Ethereum mainnet lists ~35 reserves, which is ~35
+        sequential round trips when awaited in a loop).
+
         Returns:
-            A list of ``(symbol, token_address, user_reserve_data)`` tuples,
-            one per reserve listed by ``getAllReservesTokens``.
+            A list of ``(symbol, token_address, user_reserve_data)`` tuples in
+            ``getAllReservesTokens`` order, one per reserve.
         """
         await self._ensure_contracts_initialized()
         user = EthereumAddress.from_string(user_address).raw
@@ -438,13 +450,21 @@ class AaveV3:
         reserves = (
             await self.data_provider_contract.functions.getAllReservesTokens().call()
         )
-        results: list[tuple[str, str, tuple[int | bool, ...]]] = []
-        for symbol, token_address in reserves:
-            user_data = await self.data_provider_contract.functions.getUserReserveData(
-                token_address, user
-            ).call()
-            results.append((str(symbol), str(token_address), tuple(user_data)))
-        return results
+        listed = [
+            (str(symbol), str(token_address)) for symbol, token_address in reserves
+        ]
+        user_data = await asyncio.gather(
+            *(
+                self.data_provider_contract.functions.getUserReserveData(
+                    token_address, user
+                ).call()
+                for _, token_address in listed
+            )
+        )
+        return [
+            (symbol, token_address, tuple(data))
+            for (symbol, token_address), data in zip(listed, user_data, strict=True)
+        ]
 
     async def _get_reserve_decimals(self, token_address: str) -> int:
         """Fetch a reserve's decimals from its on-chain configuration data."""
@@ -455,77 +475,109 @@ class AaveV3:
         )
         return int(configuration_data[CONFIGURATION_DATA_DECIMALS])
 
-    async def get_lending_positions(self, user_address: str) -> list[LendingPosition]:
-        """Get the user's lending positions across all Aave V3 reserves.
+    async def _get_variable_borrow_apy(self, token_address: str) -> Decimal:
+        """Fetch a reserve's current variable borrow rate as an APY."""
+        reserve_data = await self.data_provider_contract.functions.getReserveData(
+            token_address
+        ).call()
+        return apr_to_apy(
+            ray_to_decimal(int(reserve_data[RESERVE_DATA_VARIABLE_BORROW_RATE]))
+        )
 
-        aToken balances rebase, so ``supplied_amount`` is the current balance
-        (interest included) and ``accrued_interest`` is reported as zero: the
-        protocol does not expose the originally supplied principal on-chain.
+    def _build_lending_position(
+        self, symbol: str, token_address: str, user_data: ReserveTuple, decimals: int
+    ) -> LendingPosition:
+        """Assemble one lending position from already-fetched reserve data."""
+        token = self._build_reserve_token(symbol, token_address, decimals)
+        return LendingPosition(
+            asset=token,
+            supplied_amount=token.convert_to_decimals(
+                int(user_data[USER_RESERVE_ATOKEN_BALANCE])
+            ),
+            accrued_interest=Decimal(0),
+            apy=apr_to_apy(ray_to_decimal(int(user_data[USER_RESERVE_LIQUIDITY_RATE]))),
+            is_collateral=bool(user_data[USER_RESERVE_USAGE_AS_COLLATERAL]),
+            protocol=self.protocol_config.protocol_name,
+        )
+
+    async def _lending_positions_from(
+        self, reserves: Sequence[UserReserveEntry]
+    ) -> list[LendingPosition]:
+        """Build the lending positions of an already-enumerated reserve list.
+
+        Only reserves with a non-zero aToken balance need their decimals, and
+        those lookups are independent, so they are fetched concurrently.
         """
-        positions: list[LendingPosition] = []
-        for symbol, token_address, user_data in await self._iter_user_reserves(
-            user_address
-        ):
-            atoken_balance = int(user_data[USER_RESERVE_ATOKEN_BALANCE])
-            if atoken_balance == 0:
-                continue
-
-            decimals = await self._get_reserve_decimals(token_address)
-            token = self._build_reserve_token(symbol, token_address, decimals)
-            positions.append(
-                LendingPosition(
-                    asset=token,
-                    supplied_amount=token.convert_to_decimals(atoken_balance),
-                    accrued_interest=Decimal(0),
-                    apy=apr_to_apy(
-                        ray_to_decimal(int(user_data[USER_RESERVE_LIQUIDITY_RATE]))
-                    ),
-                    is_collateral=bool(user_data[USER_RESERVE_USAGE_AS_COLLATERAL]),
-                    protocol=self.protocol_config.protocol_name,
-                )
+        held = [
+            entry
+            for entry in reserves
+            if int(entry[2][USER_RESERVE_ATOKEN_BALANCE]) != 0
+        ]
+        decimals = await asyncio.gather(
+            *(self._get_reserve_decimals(token_address) for _, token_address, _ in held)
+        )
+        return [
+            self._build_lending_position(symbol, token_address, user_data, reserve_dp)
+            for (symbol, token_address, user_data), reserve_dp in zip(
+                held, decimals, strict=True
             )
-        return positions
+        ]
 
-    async def get_borrowing_positions(
-        self, user_address: str
+    async def _borrowing_positions_from(
+        self, reserves: Sequence[UserReserveEntry]
     ) -> list[BorrowingPosition]:
-        """Get the user's borrowing positions across all Aave V3 reserves.
+        """Build the borrowing positions of an already-enumerated reserve list.
 
-        A reserve can hold both a variable-rate and a stable-rate debt; each
-        yields its own position. For stable debt the accrued interest is the
-        difference between the current and the principal stable debt; variable
-        debt has no on-chain principal, so the current debt is reported as
-        ``borrowed_amount`` with zero ``accrued_interest``.
+        Reserve decimals (one per indebted reserve) and variable borrow rates
+        (one per reserve carrying variable debt) are independent read calls,
+        so each set is fetched concurrently rather than inside the loop.
         """
+        indebted = [
+            entry
+            for entry in reserves
+            if int(entry[2][USER_RESERVE_STABLE_DEBT]) != 0
+            or int(entry[2][USER_RESERVE_VARIABLE_DEBT]) != 0
+        ]
+        decimals = await asyncio.gather(
+            *(
+                self._get_reserve_decimals(token_address)
+                for _, token_address, _ in indebted
+            )
+        )
+        variable_addresses = [
+            token_address
+            for _, token_address, user_data in indebted
+            if int(user_data[USER_RESERVE_VARIABLE_DEBT]) > 0
+        ]
+        variable_apys = dict(
+            zip(
+                variable_addresses,
+                await asyncio.gather(
+                    *(
+                        self._get_variable_borrow_apy(token_address)
+                        for token_address in variable_addresses
+                    )
+                ),
+                strict=True,
+            )
+        )
+
         positions: list[BorrowingPosition] = []
-        for symbol, token_address, user_data in await self._iter_user_reserves(
-            user_address
+        for (symbol, token_address, user_data), reserve_dp in zip(
+            indebted, decimals, strict=True
         ):
             stable_debt = int(user_data[USER_RESERVE_STABLE_DEBT])
             variable_debt = int(user_data[USER_RESERVE_VARIABLE_DEBT])
-            if stable_debt == 0 and variable_debt == 0:
-                continue
-
-            decimals = await self._get_reserve_decimals(token_address)
-            token = self._build_reserve_token(symbol, token_address, decimals)
+            token = self._build_reserve_token(symbol, token_address, reserve_dp)
 
             if variable_debt > 0:
-                reserve_data = (
-                    await self.data_provider_contract.functions.getReserveData(
-                        token_address
-                    ).call()
-                )
                 positions.append(
                     BorrowingPosition(
                         asset=token,
                         borrowed_amount=token.convert_to_decimals(variable_debt),
                         accrued_interest=Decimal(0),
                         interest_rate_mode=InterestRateMode.VARIABLE,
-                        current_rate=apr_to_apy(
-                            ray_to_decimal(
-                                int(reserve_data[RESERVE_DATA_VARIABLE_BORROW_RATE])
-                            )
-                        ),
+                        current_rate=variable_apys[token_address],
                         protocol=self.protocol_config.protocol_name,
                     )
                 )
@@ -551,6 +603,61 @@ class AaveV3:
                     )
                 )
         return positions
+
+    async def get_positions(
+        self, user_address: str
+    ) -> tuple[list[LendingPosition], list[BorrowingPosition]]:
+        """Get the user's lending and borrowing positions in one pass.
+
+        Both sides are derived from the same reserve enumeration, so this
+        costs one ``getAllReservesTokens`` plus one concurrent round of
+        ``getUserReserveData`` — half the calls of invoking
+        :meth:`get_lending_positions` and :meth:`get_borrowing_positions`
+        separately, which enumerate once each. Prefer it whenever both sides
+        are needed; the two single-sided getters are unchanged for callers
+        that only want one.
+
+        Returns:
+            A ``(lending_positions, borrowing_positions)`` tuple
+        """
+        reserves = await self._iter_user_reserves(user_address)
+        lending, borrowing = await asyncio.gather(
+            self._lending_positions_from(reserves),
+            self._borrowing_positions_from(reserves),
+        )
+        return lending, borrowing
+
+    async def get_lending_positions(self, user_address: str) -> list[LendingPosition]:
+        """Get the user's lending positions across all Aave V3 reserves.
+
+        aToken balances rebase, so ``supplied_amount`` is the current balance
+        (interest included) and ``accrued_interest`` is reported as zero: the
+        protocol does not expose the originally supplied principal on-chain.
+
+        Use :meth:`get_positions` when the borrowing side is needed too: it
+        shares this method's single reserve enumeration.
+        """
+        return await self._lending_positions_from(
+            await self._iter_user_reserves(user_address)
+        )
+
+    async def get_borrowing_positions(
+        self, user_address: str
+    ) -> list[BorrowingPosition]:
+        """Get the user's borrowing positions across all Aave V3 reserves.
+
+        A reserve can hold both a variable-rate and a stable-rate debt; each
+        yields its own position. For stable debt the accrued interest is the
+        difference between the current and the principal stable debt; variable
+        debt has no on-chain principal, so the current debt is reported as
+        ``borrowed_amount`` with zero ``accrued_interest``.
+
+        Use :meth:`get_positions` when the lending side is needed too: it
+        shares this method's single reserve enumeration.
+        """
+        return await self._borrowing_positions_from(
+            await self._iter_user_reserves(user_address)
+        )
 
     # === Transaction building (wallet required) ===
 

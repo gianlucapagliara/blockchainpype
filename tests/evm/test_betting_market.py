@@ -99,6 +99,12 @@ CONDITION_ID = "0x" + "12" * 32
 #: A market flagged ``neg_risk``: its orders settle on the NegRisk CTF
 #: Exchange and must be signed against that verifying contract.
 NEG_RISK_CONDITION_ID = "0x" + "ab" * 32
+#: A market quoting the finest CLOB grid (0.0001 tick): long-shot prices such
+#: as 0.0003 are tradeable there and quantize to zero on any coarser tick.
+FINE_TICK_CONDITION_ID = "0x" + "cd" * 32
+#: A market whose payload advertises no tick at all, so the configured
+#: default must be used (and that outcome cached).
+NO_TICK_CONDITION_ID = "0x" + "ef" * 32
 TOKEN_ID_YES = (
     "71321045679252212594626385532706912750332728571942532289631379312455583992563"
 )
@@ -304,6 +310,31 @@ NEG_RISK_CLOB_MARKET_PAYLOAD: dict[str, Any] = {
     "neg_risk": True,
 }
 
+#: A long-shot market on the finest tick the exchange supports. Its quoted
+#: prices (0.0003 / 0.9997) only exist on a 0.0001 grid.
+FINE_TICK_CLOB_MARKET_PAYLOAD: dict[str, Any] = {
+    **CLOB_MARKET_PAYLOAD,
+    "condition_id": FINE_TICK_CONDITION_ID,
+    "question": "Will a 3000:1 long shot win the league?",
+    "market_slug": "long-shot-league",
+    "minimum_tick_size": 0.0001,
+    "tokens": [
+        {"token_id": TOKEN_ID_YES, "outcome": "Yes", "price": 0.0003, "winner": False},
+        {"token_id": TOKEN_ID_NO, "outcome": "No", "price": 0.9997, "winner": False},
+    ],
+}
+
+#: A market payload with no ``minimum_tick_size`` field at all.
+NO_TICK_CLOB_MARKET_PAYLOAD: dict[str, Any] = {
+    key: value
+    for key, value in CLOB_MARKET_PAYLOAD.items()
+    if key != "minimum_tick_size"
+} | {
+    "condition_id": NO_TICK_CONDITION_ID,
+    "question": "Will a market without an advertised tick resolve Yes?",
+    "market_slug": "no-advertised-tick",
+}
+
 GAMMA_MARKET_PAYLOAD: dict[str, Any] = {
     "id": "253591",
     "question": "Will Bitcoin reach $150k by end of 2025?",
@@ -455,6 +486,11 @@ def clob_market_session() -> FakeHttpSession:
         {
             ("GET", f"/markets/{CONDITION_ID}"): CLOB_MARKET_PAYLOAD,
             ("GET", f"/markets/{NEG_RISK_CONDITION_ID}"): NEG_RISK_CLOB_MARKET_PAYLOAD,
+            (
+                "GET",
+                f"/markets/{FINE_TICK_CONDITION_ID}",
+            ): FINE_TICK_CLOB_MARKET_PAYLOAD,
+            ("GET", f"/markets/{NO_TICK_CONDITION_ID}"): NO_TICK_CLOB_MARKET_PAYLOAD,
         }
     )
 
@@ -1111,16 +1147,43 @@ class TestReadPath:
         with pytest.raises(ValueError, match="status 500"):
             await strategy.get_markets()
 
-    async def test_session_lifecycle(
+    async def test_injected_session_is_left_open_on_close(
         self, polygon_blockchain: EthereumBlockchain
     ) -> None:
+        """Regression: close() used to close a caller-owned aiohttp session.
+
+        The constructor documents both the CLOB client and the Gamma/Data-API
+        session as externally managed, so neither may be torn down here: the
+        caller may still be using that session elsewhere.
+        """
         strategy, clob_fake, http_fake = self.make_polymarket(polygon_blockchain)
-        # Injected CLOB client stays caller-owned; the gamma session is closed
         async with strategy:
             pass
-        assert http_fake.closed is True
+        assert http_fake.closed is False
         assert clob_fake.closed is False
+        # The session is kept, so the strategy stays usable after close()
+        assert strategy._session is http_fake
+
+    async def test_owned_session_lifecycle(
+        self, polygon_blockchain: EthereumBlockchain
+    ) -> None:
+        """A session the strategy created itself is closed and released."""
+        strategy = Polymarket(
+            PolymarketConfiguration(fee_rate=Decimal("0.02")), polygon_blockchain
+        )
+        session = await strategy._get_session()
+        assert isinstance(session, aiohttp.ClientSession)
+        assert session.closed is False
+
+        await strategy.close()
+        assert session.closed is True
         assert strategy._session is None
+
+        # A later call creates (and owns) a fresh session
+        replacement = await strategy._get_session()
+        assert replacement is not session
+        await strategy.close()
+        assert replacement.closed is True
 
 
 # === Order building (facade write path, off-chain) ===
@@ -1261,10 +1324,13 @@ class TestOrderBuilding:
     async def test_facade_clamped_price_is_accepted_by_the_order_math(
         self, polymarket: Polymarket, ethereum_wallet: Any
     ) -> None:
-        """The facade's derived-price clamp is exactly what the CLOB accepts.
+        """The facade's derived-price clamp is what a 0.001-tick market takes.
 
         Regression: 0.99 * (1 + 5% slippage) = 1.0395 is rejected here, which
-        is why BettingMarket clamps derived prices at 0.999.
+        is why BettingMarket clamps derived prices at 0.999. That clamp lives
+        on the 0.001 grid, so the tick is passed explicitly: the fixture
+        market quotes a 0.01 tick, on which 0.999 is not a tradeable price
+        (see :meth:`test_clamped_price_is_rejected_on_a_coarse_tick_market`).
         """
         polymarket.set_wallet(ethereum_wallet)
 
@@ -1283,16 +1349,35 @@ class TestOrderBuilding:
             amount=Decimal("100"),
             max_price=MAX_DERIVED_OUTCOME_PRICE,
             user_address=TEST_ADDRESS,
+            tick_size=Decimal("0.001"),
         )
         payload = transaction.other_data["clob_order"]
         # 100 USDC / 0.999 = 100.1001... shares, floored to the 0.01 step
         assert payload["takerAmount"] == "100100000"
         assert payload["makerAmount"] == "99999900"  # 0.999 * 100.10 USDC
 
+    async def test_clamped_price_is_rejected_on_a_coarse_tick_market(
+        self, polymarket: Polymarket, ethereum_wallet: Any
+    ) -> None:
+        """A 0.01-tick market cannot trade the 0.999 clamp: it rounds to 1.
+
+        Honouring the market's tick makes this fail while building instead of
+        posting a price the exchange would reject.
+        """
+        polymarket.set_wallet(ethereum_wallet)
+        with pytest.raises(ValueError, match="rounds to 1.00 at tick 0.01"):
+            await polymarket.build_buy_transaction(
+                CONDITION_ID,
+                TOKEN_ID_YES,
+                amount=Decimal("100"),
+                max_price=MAX_DERIVED_OUTCOME_PRICE,
+                user_address=TEST_ADDRESS,
+            )
+
     async def test_clamped_sell_price_is_accepted_by_the_order_math(
         self, polymarket: Polymarket, ethereum_wallet: Any
     ) -> None:
-        """The mirror clamp: 0.001 is the smallest price the CLOB accepts."""
+        """The mirror clamp: 0.001 is the smallest price a 0.001 tick takes."""
         polymarket.set_wallet(ethereum_wallet)
 
         with pytest.raises(ValueError, match="strictly between 0 and 1"):
@@ -1310,6 +1395,7 @@ class TestOrderBuilding:
             shares=Decimal("100"),
             min_price=MIN_DERIVED_OUTCOME_PRICE,
             user_address=TEST_ADDRESS,
+            tick_size=Decimal("0.001"),
         )
         payload = transaction.other_data["clob_order"]
         assert payload["makerAmount"] == "100000000"  # 100 shares
@@ -1488,12 +1574,13 @@ class TestOrderBuilding:
             == 1
         )
 
-    async def test_explicit_neg_risk_skips_resolution(
+    async def test_explicit_neg_risk_and_tick_skip_resolution(
         self,
         polymarket: Polymarket,
         ethereum_wallet: Any,
         clob_market_session: FakeHttpSession,
     ) -> None:
+        """Passing both market-derived values makes order building offline."""
         polymarket.set_wallet(ethereum_wallet)
         transaction = await polymarket.build_buy_transaction(
             "0x" + "99" * 32,  # unknown market: no canned response exists
@@ -1502,10 +1589,34 @@ class TestOrderBuilding:
             Decimal("0.60"),
             TEST_ADDRESS,
             neg_risk=True,
+            tick_size=Decimal("0.01"),
         )
 
         assert transaction.other_data["neg_risk"] is True
         assert clob_market_session.requests == []
+
+    async def test_explicit_neg_risk_still_resolves_the_tick(
+        self,
+        polymarket: Polymarket,
+        ethereum_wallet: Any,
+        clob_market_session: FakeHttpSession,
+    ) -> None:
+        """An explicit neg-risk flag does not opt out of the market's tick."""
+        polymarket.set_wallet(ethereum_wallet)
+        transaction = await polymarket.build_buy_transaction(
+            FINE_TICK_CONDITION_ID,
+            TOKEN_ID_YES,
+            Decimal("0.03"),
+            Decimal("0.0003"),
+            TEST_ADDRESS,
+            neg_risk=False,
+        )
+
+        assert transaction.other_data["clob_order"]["makerAmount"] == "30000"
+        assert (
+            len(clob_market_session.requests_for(f"/markets/{FINE_TICK_CONDITION_ID}"))
+            == 1
+        )
 
     async def test_regular_market_keeps_the_ctf_exchange(
         self, polymarket: Polymarket, ethereum_wallet: Any
@@ -1548,6 +1659,252 @@ class TestOrderBuilding:
         assert body["order"]["makerAmount"] == "60000000"
         assert body["order"]["takerAmount"] == "100000000"
         assert body["order"]["maker"] == TEST_ADDRESS
+
+
+# === Per-market price ticks ===
+
+
+class TestMarketTickSize:
+    """Order prices must be quantized on the grid the market actually trades.
+
+    Regression: order building used to ignore the payload's
+    ``minimum_tick_size`` and always quantize on the configured 0.001
+    default, which makes a 0.0001-tick market untradeable at long-shot prices
+    (they round to zero) and silently re-prices every other fine-grid price.
+    """
+
+    def test_clob_tick_size_parsed_into_metadata_and_cache(
+        self, polymarket: Polymarket
+    ) -> None:
+        coarse = polymarket._parse_clob_market(CLOB_MARKET_PAYLOAD)
+        fine = polymarket._parse_clob_market(FINE_TICK_CLOB_MARKET_PAYLOAD)
+
+        assert coarse.metadata["tick_size"] == Decimal("0.01")
+        assert fine.metadata["tick_size"] == Decimal("0.0001")
+        assert polymarket._tick_size_by_market[CONDITION_ID] == Decimal("0.01")
+        assert polymarket._tick_size_by_market[FINE_TICK_CONDITION_ID] == Decimal(
+            "0.0001"
+        )
+
+    def test_missing_tick_is_parsed_and_cached_as_none(
+        self, polymarket: Polymarket
+    ) -> None:
+        market = polymarket._parse_clob_market(NO_TICK_CLOB_MARKET_PAYLOAD)
+        assert market.metadata["tick_size"] is None
+        assert polymarket._tick_size_by_market[NO_TICK_CONDITION_ID] is None
+
+    def test_gamma_tick_size_primes_the_same_cache(
+        self, polymarket: Polymarket
+    ) -> None:
+        payload = dict(GAMMA_MARKET_PAYLOAD)
+        payload["orderPriceMinTickSize"] = 0.0001
+        market = polymarket._parse_gamma_market(payload)
+
+        assert market.metadata["tick_size"] == Decimal("0.0001")
+        assert polymarket._tick_size_by_market[CONDITION_ID] == Decimal("0.0001")
+        assert (
+            polymarket._parse_gamma_market(GAMMA_MARKET_PAYLOAD).metadata["tick_size"]
+            is None
+        )
+
+    def test_only_supported_ticks_are_accepted(self, polymarket: Polymarket) -> None:
+        assert polymarket._parse_tick_size(None) is None
+        assert polymarket._parse_tick_size("") is None
+        assert polymarket._parse_tick_size(0.02) is None  # not a CLOB tick
+        assert polymarket._parse_tick_size("not-a-number") is None
+        assert polymarket._parse_tick_size(True) is None
+        assert polymarket._parse_tick_size(0.0001) == Decimal("0.0001")
+        assert polymarket._parse_tick_size("0.01") == Decimal("0.01")
+
+    def test_parsed_tick_is_the_canonical_scale(self, polymarket: Polymarket) -> None:
+        """``0.0100`` must not become a four-decimal price grid."""
+        canonical = polymarket._parse_tick_size("0.0100")
+        assert canonical == Decimal("0.01")
+        assert canonical is not None
+        assert canonical.as_tuple().exponent == -2
+
+    async def test_buy_quantizes_on_the_market_tick(
+        self,
+        polymarket: Polymarket,
+        ethereum_wallet: Any,
+        clob_market_session: FakeHttpSession,
+    ) -> None:
+        """Exact amounts for a 0.0001-tick market trading at 0.0003."""
+        polymarket.set_wallet(ethereum_wallet)
+        transaction = await polymarket.build_buy_transaction(
+            market_id=FINE_TICK_CONDITION_ID,
+            outcome_token_id=TOKEN_ID_YES,
+            amount=Decimal("0.03"),
+            max_price=Decimal("0.0003"),
+            user_address=TEST_ADDRESS,
+        )
+
+        payload = transaction.other_data["clob_order"]
+        assert payload["side"] == "BUY"
+        # 0.03 USDC / 0.0003 = 100 shares; 0.0003 * 100 = 0.03 USDC
+        assert payload["takerAmount"] == "100000000"
+        assert payload["makerAmount"] == "30000"
+        # A single market fetch served both the neg-risk flag and the tick
+        assert (
+            len(clob_market_session.requests_for(f"/markets/{FINE_TICK_CONDITION_ID}"))
+            == 1
+        )
+
+    async def test_sell_quantizes_on_the_market_tick(
+        self, polymarket: Polymarket, ethereum_wallet: Any
+    ) -> None:
+        polymarket.set_wallet(ethereum_wallet)
+        transaction = await polymarket.build_sell_transaction(
+            market_id=FINE_TICK_CONDITION_ID,
+            outcome_token_id=TOKEN_ID_YES,
+            shares=Decimal("100"),
+            min_price=Decimal("0.0003"),
+            user_address=TEST_ADDRESS,
+        )
+
+        payload = transaction.other_data["clob_order"]
+        assert payload["side"] == "SELL"
+        assert payload["makerAmount"] == "100000000"  # 100 shares
+        assert payload["takerAmount"] == "30000"  # 0.03 USDC
+
+    async def test_default_tick_cannot_price_a_fine_tick_market(
+        self, polymarket: Polymarket, ethereum_wallet: Any
+    ) -> None:
+        """The pre-fix behaviour, pinned: the 0.001 default rejects 0.0003."""
+        polymarket.set_wallet(ethereum_wallet)
+        with pytest.raises(ValueError, match="rounds to 0.000 at tick 0.001"):
+            await polymarket.build_buy_transaction(
+                FINE_TICK_CONDITION_ID,
+                TOKEN_ID_YES,
+                amount=Decimal("0.03"),
+                max_price=Decimal("0.0003"),
+                user_address=TEST_ADDRESS,
+                tick_size=Decimal("0.001"),
+            )
+
+    async def test_explicit_tick_size_overrides_the_market(
+        self, polymarket: Polymarket, ethereum_wallet: Any
+    ) -> None:
+        polymarket.set_wallet(ethereum_wallet)
+        overridden = await polymarket.build_buy_transaction(
+            FINE_TICK_CONDITION_ID,
+            TOKEN_ID_YES,
+            amount=Decimal("0.06"),
+            max_price=Decimal("0.0006"),
+            user_address=TEST_ADDRESS,
+            tick_size=Decimal("0.001"),
+        )
+        # 0.06 / 0.0006 = 100 shares; the override rounds 0.0006 HALF_UP to
+        # 0.001, so 0.1 USDC is committed instead of the market grid's 0.06
+        assert overridden.other_data["clob_order"]["takerAmount"] == "100000000"
+        assert overridden.other_data["clob_order"]["makerAmount"] == "100000"
+
+        market_grid = await polymarket.build_buy_transaction(
+            FINE_TICK_CONDITION_ID,
+            TOKEN_ID_YES,
+            amount=Decimal("0.06"),
+            max_price=Decimal("0.0006"),
+            user_address=TEST_ADDRESS,
+        )
+        assert market_grid.other_data["clob_order"]["makerAmount"] == "60000"
+
+    async def test_default_tick_preserved_when_the_payload_lacks_the_field(
+        self,
+        polymarket: Polymarket,
+        ethereum_wallet: Any,
+        clob_market_session: FakeHttpSession,
+    ) -> None:
+        polymarket.set_wallet(ethereum_wallet)
+        transaction = await polymarket.build_buy_transaction(
+            NO_TICK_CONDITION_ID,
+            TOKEN_ID_YES,
+            amount=Decimal("0.06"),
+            max_price=Decimal("0.0006"),
+            user_address=TEST_ADDRESS,
+        )
+
+        payload = transaction.other_data["clob_order"]
+        # The configured 0.001 default rounds 0.0006 HALF_UP to 0.001
+        assert payload["takerAmount"] == "100000000"
+        assert payload["makerAmount"] == "100000"
+
+        # "No tick advertised" is cached too: the fallback never re-fetches
+        await polymarket.build_buy_transaction(
+            NO_TICK_CONDITION_ID,
+            TOKEN_ID_YES,
+            amount=Decimal("0.06"),
+            max_price=Decimal("0.0006"),
+            user_address=TEST_ADDRESS,
+        )
+        assert (
+            len(clob_market_session.requests_for(f"/markets/{NO_TICK_CONDITION_ID}"))
+            == 1
+        )
+
+    async def test_read_market_primes_the_tick_cache(
+        self,
+        polymarket: Polymarket,
+        ethereum_wallet: Any,
+        clob_market_session: FakeHttpSession,
+    ) -> None:
+        """A market already read through get_market needs no extra request."""
+        polymarket.set_wallet(ethereum_wallet)
+        market = await polymarket.get_market(FINE_TICK_CONDITION_ID)
+        assert market.metadata["tick_size"] == Decimal("0.0001")
+
+        transaction = await polymarket.build_buy_transaction(
+            FINE_TICK_CONDITION_ID,
+            TOKEN_ID_YES,
+            amount=Decimal("0.03"),
+            max_price=Decimal("0.0003"),
+            user_address=TEST_ADDRESS,
+        )
+        assert transaction.other_data["clob_order"]["makerAmount"] == "30000"
+        assert (
+            len(clob_market_session.requests_for(f"/markets/{FINE_TICK_CONDITION_ID}"))
+            == 1
+        )
+
+    def test_build_order_accepts_an_explicit_tick(
+        self, polymarket: Polymarket, ethereum_wallet: Any
+    ) -> None:
+        polymarket.set_wallet(ethereum_wallet)
+        signed = polymarket.build_order(
+            TOKEN_ID_YES,
+            OrderSide.BUY,
+            price=Decimal("0.0003"),
+            size=Decimal("100"),
+            tick_size=Decimal("0.0001"),
+        )
+        assert signed.order.maker_amount == 30_000
+        assert signed.order.taker_amount == 100_000_000
+
+    async def test_place_buy_forwards_the_tick(
+        self, polygon_blockchain: EthereumBlockchain, ethereum_wallet: Any
+    ) -> None:
+        clob_fake = FakeHttpSession({("POST", "/order"): ORDER_POST_RESPONSE_PAYLOAD})
+        credentials = ClobCredentials(
+            api_key="key-123", secret=PINNED_SECRET, passphrase="pass-456"
+        )
+        strategy = Polymarket(
+            PolymarketConfiguration(fee_rate=Decimal("0"), credentials=credentials),
+            polygon_blockchain,
+            wallet=ethereum_wallet,
+            clob_client=ClobClient(
+                credentials=credentials, session=as_session(clob_fake)
+            ),
+        )
+
+        response = await strategy.place_buy(
+            TOKEN_ID_YES,
+            price=Decimal("0.0003"),
+            size=Decimal("100"),
+            tick_size=Decimal("0.0001"),
+        )
+        assert response.success is True
+        body = json.loads(clob_fake.requests[0]["body"])
+        assert body["order"]["makerAmount"] == "30000"
+        assert body["order"]["takerAmount"] == "100000000"
 
 
 # === On-chain write path: redeem + approvals ===

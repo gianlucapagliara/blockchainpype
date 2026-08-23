@@ -25,7 +25,7 @@ CLOB (``clob.polymarket.com``) for markets/books/prices, Gamma
 import json
 import uuid
 from datetime import UTC, datetime
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from types import TracebackType
 from typing import Any, Final, Self, cast
 
@@ -51,6 +51,7 @@ from blockchainpype.evm.blockchain.gas import GasConfiguration
 from blockchainpype.evm.blockchain.identifier import EthereumAddress
 from blockchainpype.evm.dapp.abi import EthereumLocalFileABI
 from blockchainpype.evm.dapp.betting_market.clob import (
+    VALID_TICK_SIZES,
     ClobClient,
     ClobCredentials,
     ClobOrder,
@@ -124,7 +125,9 @@ class PolymarketConfiguration(ProtocolConfiguration):
         credentials: Optional L2 API credentials; without them all read
             endpoints still work but orders cannot be posted
         signature_type: How order signatures are verified (EOA by default)
-        default_tick_size: Price tick used when building orders
+        default_tick_size: Fallback price tick, used only when the market
+            advertises none of its own — ``build_buy_transaction`` /
+            ``build_sell_transaction`` read each market's ``minimum_tick_size``
         default_order_type: CLOB order type used by ``place_buy``/``place_sell``
     """
 
@@ -231,6 +234,15 @@ class Polymarket(ProtocolImplementation):
       EIP-712 verifying contract for markets flagged ``neg_risk``; regular
       markets keep ``ctf_exchange_address``. The flag is read from the CLOB
       market payload and cached per condition id.
+    * ``PolymarketConfiguration.default_tick_size`` is only the fallback: each
+      market's own ``minimum_tick_size`` is read from the CLOB payload and
+      cached per condition id exactly like the neg-risk flag, so orders are
+      quantized on the grid the market actually trades on (see
+      :meth:`_resolve_tick_size`).
+
+    HTTP resources follow the usual ownership rule: sessions and CLOB clients
+    injected by the caller are left alone by :meth:`close`, only the ones this
+    strategy created itself are closed.
     """
 
     def __init__(
@@ -253,15 +265,20 @@ class Polymarket(ProtocolImplementation):
             max_gas_price_gwei: Optional cap applied to the gas-fee fields of
                 built transactions (facades forward their configured value)
             clob_client: Optional pre-built CLOB client (dependency injection
-                for tests); created from the configuration when omitted
+                for tests); created from the configuration when omitted — an
+                injected client is left open by :meth:`close`
             session: Optional externally managed aiohttp session for the
-                Gamma/Data API requests
+                Gamma/Data API requests; an injected session stays the
+                caller's responsibility and is never closed by :meth:`close`
         """
         self.configuration = configuration
         self.blockchain = blockchain
         self._wallet = wallet
         self._max_gas_price_gwei = max_gas_price_gwei
         self._session = session
+        #: Only sessions this strategy created itself may be closed by
+        #: :meth:`close`; an injected one is externally managed.
+        self._owns_session = session is None
         self._owns_clob_client = clob_client is None
         self._order_chain_id = (
             blockchain.platform.chain_id
@@ -282,6 +299,10 @@ class Polymarket(ProtocolImplementation):
         #: Neg-risk flag per condition id, filled in by the market parsers and
         #: by :meth:`_resolve_neg_risk` so order building does not re-fetch.
         self._neg_risk_by_market: dict[str, bool] = {}
+        #: Price tick per condition id, filled in by the same parsers. A
+        #: ``None`` value means "market parsed, but it advertised no usable
+        #: tick", which is cached too so the fallback costs no extra request.
+        self._tick_size_by_market: dict[str, Decimal | None] = {}
 
         self.conditional_tokens_contract = BlockchainBoundContract(
             EthereumContractConfiguration(
@@ -381,9 +402,14 @@ class Polymarket(ProtocolImplementation):
     # === HTTP plumbing (Gamma / Data API) ===
 
     async def _get_session(self) -> aiohttp.ClientSession:
-        """Get or lazily create the HTTP session for Gamma/Data API calls."""
+        """Get or lazily create the HTTP session for Gamma/Data API calls.
+
+        A lazily created session is owned by this strategy, so :meth:`close`
+        releases it (and a later call creates a fresh one).
+        """
         if self._session is None:
             self._session = aiohttp.ClientSession()
+            self._owns_session = True
         return self._session
 
     async def _get_json(
@@ -414,8 +440,14 @@ class Polymarket(ProtocolImplementation):
             raise ValueError(f"API request GET {url} failed: {error}") from error
 
     async def close(self) -> None:
-        """Close the HTTP session and the owned CLOB client."""
-        if self._session is not None:
+        """Release the HTTP resources this strategy owns.
+
+        Only self-created resources are closed: a session or CLOB client the
+        caller injected is externally managed (as the constructor documents)
+        and stays open and usable — closing it would tear down a session its
+        owner may still be using elsewhere.
+        """
+        if self._owns_session and self._session is not None:
             await self._session.close()
             self._session = None
         if self._owns_clob_client:
@@ -594,9 +626,39 @@ class Polymarket(ProtocolImplementation):
         cached = self._neg_risk_by_market.get(market_id)
         if cached is not None:
             return cached
-        # Parsing caches the flag as a side effect.
+        # Parsing caches the flag (and the tick size) as a side effect.
         self._parse_clob_market(await self._clob.get_market(market_id))
         return self._neg_risk_by_market.get(market_id, False)
+
+    async def _resolve_tick_size(self, market_id: str) -> Decimal:
+        """Resolve a market's price tick, fetching the market if needed.
+
+        Every market advertises its own ``minimum_tick_size`` (0.1 / 0.01 /
+        0.001 / 0.0001) and the CLOB rejects prices off that grid, so orders
+        must be quantized with the market's tick rather than a global default:
+        on a 0.0001-tick market a price such as 0.0003 quantizes to zero at
+        the coarser default and the order can never be built.
+
+        The tick is cached per condition id exactly like the neg-risk flag, so
+        a market already read through :meth:`get_market`/:meth:`get_markets`
+        — or fetched moments earlier by :meth:`_resolve_neg_risk` — needs no
+        extra request. Markets whose payload advertises no usable tick fall
+        back to ``configuration.default_tick_size`` (that outcome is cached
+        too, so the fallback never re-fetches).
+
+        Args:
+            market_id: The market's condition id
+
+        Returns:
+            Decimal: The tick prices for this market must be quantized to
+        """
+        if market_id not in self._tick_size_by_market:
+            # Parsing caches the tick (and the neg-risk flag) as a side effect.
+            self._parse_clob_market(await self._clob.get_market(market_id))
+        cached = self._tick_size_by_market.get(market_id)
+        if cached is not None:
+            return cached
+        return self.configuration.default_tick_size
 
     def build_order(
         self,
@@ -620,7 +682,11 @@ class Polymarket(ProtocolImplementation):
             expiration: Unix expiration timestamp; 0 means no expiration
             nonce: Maker's exchange nonce
             salt: Explicit salt (random when omitted)
-            tick_size: Market price tick; configuration default when omitted
+            tick_size: Price grid to quantize ``price`` to; the configured
+                default when omitted. This low-level builder takes no market
+                id, so it cannot resolve the market's own tick — use
+                :meth:`build_buy_transaction` / :meth:`build_sell_transaction`
+                for that
             neg_risk: Whether the outcome token belongs to a neg-risk market;
                 selects the EIP-712 verifying contract (see
                 :meth:`verifying_contract`)
@@ -675,16 +741,24 @@ class Polymarket(ProtocolImplementation):
         size: Decimal,
         order_type: str | None = None,
         neg_risk: bool = False,
+        tick_size: Decimal | None = None,
     ) -> OrderPostResponse:
         """Sign a BUY order and post it to the CLOB.
 
         Requires a bound wallet (for signing) and configured
         :class:`ClobCredentials` (for the authenticated ``POST /order``).
-        ``neg_risk`` selects the EIP-712 verifying contract; use
-        :meth:`build_buy_transaction` to have it resolved from the market.
+        ``neg_risk`` selects the EIP-712 verifying contract and ``tick_size``
+        the price grid; both take a market id to be resolved automatically, so
+        use :meth:`build_buy_transaction` + :meth:`post_order` to have them
+        read from the market instead of passed in.
         """
         signed_order = self.build_order(
-            outcome_token_id, OrderSide.BUY, price, size, neg_risk=neg_risk
+            outcome_token_id,
+            OrderSide.BUY,
+            price,
+            size,
+            tick_size=tick_size,
+            neg_risk=neg_risk,
         )
         return await self._clob.post_order(
             signed_order,
@@ -698,14 +772,21 @@ class Polymarket(ProtocolImplementation):
         size: Decimal,
         order_type: str | None = None,
         neg_risk: bool = False,
+        tick_size: Decimal | None = None,
     ) -> OrderPostResponse:
         """Sign a SELL order and post it to the CLOB.
 
-        ``neg_risk`` selects the EIP-712 verifying contract; use
-        :meth:`build_sell_transaction` to have it resolved from the market.
+        ``neg_risk`` selects the EIP-712 verifying contract and ``tick_size``
+        the price grid; use :meth:`build_sell_transaction` + :meth:`post_order`
+        to have both resolved from the market.
         """
         signed_order = self.build_order(
-            outcome_token_id, OrderSide.SELL, price, size, neg_risk=neg_risk
+            outcome_token_id,
+            OrderSide.SELL,
+            price,
+            size,
+            tick_size=tick_size,
+            neg_risk=neg_risk,
         )
         return await self._clob.post_order(
             signed_order,
@@ -760,6 +841,7 @@ class Polymarket(ProtocolImplementation):
         user_address: str,
         client_operation_id: str | None = None,
         neg_risk: bool | None = None,
+        tick_size: Decimal | None = None,
     ) -> EthereumTransaction:
         """Build (without posting) a signed CLOB BUY order for the facade.
 
@@ -780,6 +862,10 @@ class Polymarket(ProtocolImplementation):
             neg_risk: Whether to sign against the NegRisk CTF Exchange; when
                 omitted the flag is resolved from the market (cached, see
                 :meth:`verifying_contract`)
+            tick_size: Price grid to quantize ``max_price`` to; when omitted
+                the market's own ``minimum_tick_size`` is used, falling back
+                to ``configuration.default_tick_size`` (see
+                :meth:`_resolve_tick_size`)
 
         Raises:
             ValueError: If no wallet is bound or ``user_address`` mismatches
@@ -788,14 +874,19 @@ class Polymarket(ProtocolImplementation):
         self._require_wallet_address_match(user_address, wallet)
         if max_price <= 0:
             raise ValueError(f"max_price must be positive, got {max_price}")
+        # Resolving the neg-risk flag first caches the whole market payload,
+        # so the tick resolution below reuses that single request.
         if neg_risk is None:
             neg_risk = await self._resolve_neg_risk(market_id)
+        if tick_size is None:
+            tick_size = await self._resolve_tick_size(market_id)
 
         signed_order = self.build_order(
             outcome_token_id,
             OrderSide.BUY,
             price=max_price,
             size=amount / max_price,
+            tick_size=tick_size,
             neg_risk=neg_risk,
         )
         if client_operation_id is None:
@@ -813,13 +904,15 @@ class Polymarket(ProtocolImplementation):
         user_address: str,
         client_operation_id: str | None = None,
         neg_risk: bool | None = None,
+        tick_size: Decimal | None = None,
     ) -> EthereumTransaction:
         """Build (without posting) a signed CLOB SELL order for the facade.
 
         As with buys, the returned object wraps an off-chain CLOB order (see
         :meth:`build_buy_transaction`); it sells ``shares`` outcome tokens at
         limit price ``min_price``. ``neg_risk`` selects the EIP-712 verifying
-        contract and is resolved from the market when omitted.
+        contract and ``tick_size`` the price grid ``min_price`` is quantized
+        to; both are resolved from the market when omitted.
 
         Raises:
             ValueError: If no wallet is bound or ``user_address`` mismatches
@@ -828,12 +921,15 @@ class Polymarket(ProtocolImplementation):
         self._require_wallet_address_match(user_address, wallet)
         if neg_risk is None:
             neg_risk = await self._resolve_neg_risk(market_id)
+        if tick_size is None:
+            tick_size = await self._resolve_tick_size(market_id)
 
         signed_order = self.build_order(
             outcome_token_id,
             OrderSide.SELL,
             price=min_price,
             size=shares,
+            tick_size=tick_size,
             neg_risk=neg_risk,
         )
         if client_operation_id is None:
@@ -1038,6 +1134,34 @@ class Polymarket(ProtocolImplementation):
         return min(max(price, Decimal(0)), Decimal(1))
 
     @staticmethod
+    def _parse_tick_size(value: Any) -> Decimal | None:
+        """Parse a market's advertised minimum tick into a supported tick.
+
+        The CLOB quotes ``minimum_tick_size`` as a JSON number (0.01) or a
+        string ("0.01"). Only the four ticks the exchange actually supports
+        (:data:`~blockchainpype.evm.dapp.betting_market.clob.VALID_TICK_SIZES`)
+        are accepted, and the canonical constant is returned rather than the
+        parsed value: an equal-but-differently-scaled Decimal such as
+        ``0.0100`` would quantize prices onto a four-decimal grid instead of
+        the market's two-decimal one.
+
+        Returns:
+            The canonical tick, or ``None`` when the field is absent,
+            unparseable or not a tick the exchange supports (the caller then
+            falls back to the configured default).
+        """
+        if value is None or value == "" or isinstance(value, bool):
+            return None
+        try:
+            parsed = Decimal(str(value))
+        except InvalidOperation:
+            return None
+        for supported in VALID_TICK_SIZES:
+            if parsed == supported:
+                return supported
+        return None
+
+    @staticmethod
     def _decode_json_list(value: Any) -> list[Any]:
         """Decode Gamma's JSON-string-encoded lists (or pass lists through)."""
         if value is None:
@@ -1065,17 +1189,22 @@ class Polymarket(ProtocolImplementation):
         end_date: datetime | None,
         resolved_outcome_id: str | None,
         neg_risk: bool,
+        tick_size: Decimal | None,
         raw: dict[str, Any],
     ) -> BettingMarketModel:
         """Assemble a :class:`BettingMarketModel` with shared invariants.
 
-        The Polymarket-specific ``neg_risk`` flag travels in the model's
-        ``metadata`` (the shared model has no protocol-specific fields) and is
-        cached per condition id so order building can pick the right EIP-712
-        verifying contract without re-fetching the market.
+        The Polymarket-specific ``neg_risk`` flag and ``tick_size`` travel in
+        the model's ``metadata`` (the shared model has no protocol-specific
+        fields) and are cached per condition id so order building can pick the
+        right EIP-712 verifying contract and price grid without re-fetching
+        the market. ``tick_size`` is ``None`` for payloads that advertise no
+        usable tick; that is cached as well, so the fallback to the configured
+        default costs no extra request either.
         """
         if market_id:
             self._neg_risk_by_market[market_id] = neg_risk
+            self._tick_size_by_market[market_id] = tick_size
         return BettingMarketModel(
             market_id=market_id,
             title=title,
@@ -1093,6 +1222,7 @@ class Polymarket(ProtocolImplementation):
             metadata={
                 "parser_version": MARKET_PARSER_VERSION,
                 "neg_risk": neg_risk,
+                "tick_size": tick_size,
                 "raw": raw,
             },
         )
@@ -1108,6 +1238,7 @@ class Polymarket(ProtocolImplementation):
               "end_date_iso": "2025-12-31T00:00:00Z",
               "accepting_order_timestamp": "2025-01-01T00:00:00Z" | null,
               "neg_risk": false,
+              "minimum_tick_size": 0.01,
               "tags": ["Crypto", ...],
               "tokens": [
                 {"token_id": "713...", "outcome": "Yes",
@@ -1120,7 +1251,9 @@ class Polymarket(ProtocolImplementation):
         when also flagged closed; otherwise closed/inactive markets are
         CLOSED. The payload carries no volume/liquidity or creation date
         (zeros / epoch are used). ``neg_risk`` selects the exchange orders for
-        this market must be signed against (see :meth:`verifying_contract`).
+        this market must be signed against (see :meth:`verifying_contract`)
+        and ``minimum_tick_size`` the price grid they must be quantized to
+        (see :meth:`_resolve_tick_size`); both are cached per condition id.
         """
         outcomes: list[MarketOutcome] = []
         winner_outcome_id: str | None = None
@@ -1178,6 +1311,7 @@ class Polymarket(ProtocolImplementation):
             end_date=self._parse_datetime(market_data.get("end_date_iso")),
             resolved_outcome_id=winner_outcome_id,
             neg_risk=bool(market_data.get("neg_risk", False)),
+            tick_size=self._parse_tick_size(market_data.get("minimum_tick_size")),
             raw=market_data,
         )
 
@@ -1196,8 +1330,15 @@ class Polymarket(ProtocolImplementation):
               "createdAt": "2025-01-04T22:58:00.169Z",
               "endDate": "2025-12-31T12:00:00Z",
               "active": true, "closed": false, "negRisk": false,
+              "orderPriceMinTickSize": 0.01,
               "umaResolutionStatus": "resolved" | ...
             }
+
+        The Gamma tick field (``orderPriceMinTickSize``) is the counterpart of
+        the CLOB payload's ``minimum_tick_size`` and primes the same cache, so
+        markets discovered through :meth:`get_markets` can be traded without
+        an extra CLOB lookup; markets that omit it fall back to the configured
+        default tick.
 
         ``outcomes``/``outcomePrices``/``clobTokenIds`` arrive JSON-encoded
         as strings (lists are tolerated). Status precedence: a market that is
@@ -1282,6 +1423,7 @@ class Polymarket(ProtocolImplementation):
             end_date=self._parse_datetime(market_data.get("endDate")),
             resolved_outcome_id=winner_outcome_id,
             neg_risk=bool(market_data.get("negRisk", False)),
+            tick_size=self._parse_tick_size(market_data.get("orderPriceMinTickSize")),
             raw=market_data,
         )
 

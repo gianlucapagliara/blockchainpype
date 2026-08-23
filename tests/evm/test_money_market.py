@@ -11,7 +11,9 @@ Covered:
 - Tuple index maps for getReserveData / getReserveConfigurationData /
   getUserAccountData / getUserReserveData (exact Decimal conversions)
 - Ray (1e27) APR -> APY compounding, bps (1e4) and wad (1e18) conversions
-- Position enumeration over multiple reserves with real financepype assets
+- Position enumeration over multiple reserves with real financepype assets,
+  including how many data-provider calls it costs and that the independent
+  per-reserve calls are issued concurrently rather than one after another
 - Exact calldata (selector + arguments) for every build method, including the
   receiveAToken inversion regression and uint256-max full repay/withdraw
 - Wallet binding: unbound ValueError, rebinding, unsigned build-only output
@@ -19,6 +21,7 @@ Covered:
 """
 
 import asyncio
+from collections import Counter
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from decimal import Decimal
 from typing import Any, cast
@@ -671,6 +674,233 @@ class TestPositions:
         # Stable rate comes from the user's reserve data (6% APR)
         assert stable.current_rate == APY_6
         assert stable.protocol == "aave_v3"
+
+
+# === Position fetching cost (call counts + concurrency) ===
+
+#: A ``getUserReserveData`` tuple for a reserve the user never touched.
+IDLE_USER_RESERVE: tuple[int | bool, ...] = (0, 0, 0, 0, 0, 0, 0, 0, False)
+
+
+class InstrumentedCall:
+    """One pending data-provider call that records when it is in flight."""
+
+    def __init__(
+        self, provider: "InstrumentedDataProvider", name: str, result: Any
+    ) -> None:
+        self._provider = provider
+        self._name = name
+        self._result = result
+
+    async def call(self) -> Any:
+        provider = self._provider
+        provider.call_counts[self._name] += 1
+        provider.in_flight[self._name] += 1
+        provider.max_in_flight[self._name] = max(
+            provider.max_in_flight[self._name], provider.in_flight[self._name]
+        )
+        try:
+            # Yield twice, so that sibling calls dispatched in the same batch
+            # get to start before this one resolves: with asyncio.gather they
+            # overlap, with a sequential await loop they never can.
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            return self._result
+        finally:
+            provider.in_flight[self._name] -= 1
+
+
+class InstrumentedDataProvider:
+    """Counting stand-in for the Aave data provider contract.
+
+    Answers from the same canned tuples as :class:`FakeAaveNode` while
+    recording, per ABI function, how many calls were made and how many were
+    ever in flight simultaneously — the observable difference between an
+    ``asyncio.gather`` fan-out and one sequential round trip per reserve.
+    """
+
+    def __init__(self, node: FakeAaveNode, idle_reserves: int = 0) -> None:
+        self.node = node
+        self.reserves: list[tuple[str, str]] = [
+            ("USDC", USDC_ADDRESS),
+            ("WETH", WETH_ADDRESS),
+        ]
+        # Extra listed reserves the user has no position in: they still cost
+        # one getUserReserveData each, which is the N+1 storm being fixed.
+        for index in range(idle_reserves):
+            self.reserves.append((f"IDLE{index}", "0x" + f"{index + 1:040x}"))
+        self.call_counts: Counter[str] = Counter()
+        self.in_flight: Counter[str] = Counter()
+        self.max_in_flight: Counter[str] = Counter()
+        self.is_initialized = True
+
+    async def initialize(self) -> None:
+        return None
+
+    @property
+    def functions(self) -> "InstrumentedDataProvider":
+        return self
+
+    def getAllReservesTokens(self) -> InstrumentedCall:
+        return InstrumentedCall(self, "getAllReservesTokens", list(self.reserves))
+
+    def getUserReserveData(self, asset: str, user: str) -> InstrumentedCall:
+        assert user.lower() == USER_ADDRESS.lower()
+        return InstrumentedCall(
+            self,
+            "getUserReserveData",
+            self.node.user_reserve_data.get(asset.lower(), IDLE_USER_RESERVE),
+        )
+
+    def getReserveConfigurationData(self, asset: str) -> InstrumentedCall:
+        return InstrumentedCall(
+            self,
+            "getReserveConfigurationData",
+            self.node.configuration_data[asset.lower()],
+        )
+
+    def getReserveData(self, asset: str) -> InstrumentedCall:
+        return InstrumentedCall(
+            self, "getReserveData", self.node.reserve_data[asset.lower()]
+        )
+
+
+def instrument(
+    strategy: AaveV3, node: FakeAaveNode, idle_reserves: int = 0
+) -> InstrumentedDataProvider:
+    """Swap the strategy's data provider for the counting stand-in."""
+    provider = InstrumentedDataProvider(node, idle_reserves=idle_reserves)
+    strategy.data_provider_contract = cast(Any, provider)
+    return provider
+
+
+def lending_summary(positions: list[Any]) -> list[tuple[Any, ...]]:
+    return [
+        (p.asset.address.string, p.supplied_amount, p.apy, p.is_collateral)
+        for p in positions
+    ]
+
+
+def borrowing_summary(positions: list[Any]) -> list[tuple[Any, ...]]:
+    return [
+        (
+            p.asset.address.string,
+            p.borrowed_amount,
+            p.accrued_interest,
+            p.interest_rate_mode,
+            p.current_rate,
+        )
+        for p in positions
+    ]
+
+
+class TestPositionFetchingCost:
+    """Regression: positions used to cost one sequential RPC per reserve.
+
+    Each getter enumerated every reserve on its own and awaited
+    ``getUserReserveData`` one reserve at a time, so reading both sides on
+    mainnet was ~75 sequential round trips.
+    """
+
+    async def test_combined_accessor_enumerates_once(
+        self, aave_strategy: AaveV3, aave_node: FakeAaveNode
+    ) -> None:
+        provider = instrument(aave_strategy, aave_node)
+
+        lending, borrowing = await aave_strategy.get_positions(USER_ADDRESS)
+
+        assert provider.call_counts["getAllReservesTokens"] == 1
+        assert provider.call_counts["getUserReserveData"] == 2  # one per reserve
+        # Decimals for the one supplied and the one indebted reserve
+        assert provider.call_counts["getReserveConfigurationData"] == 2
+        # The variable borrow rate of the single variable-debt reserve
+        assert provider.call_counts["getReserveData"] == 1
+
+        assert [p.supplied_amount for p in lending] == [Decimal("2500")]
+        assert [p.interest_rate_mode for p in borrowing] == [
+            InterestRateMode.VARIABLE,
+            InterestRateMode.STABLE,
+        ]
+
+    async def test_separate_getters_each_enumerate_once(
+        self, aave_strategy: AaveV3, aave_node: FakeAaveNode
+    ) -> None:
+        provider = instrument(aave_strategy, aave_node)
+
+        await aave_strategy.get_lending_positions(USER_ADDRESS)
+        assert provider.call_counts["getAllReservesTokens"] == 1
+        assert provider.call_counts["getUserReserveData"] == 2
+
+        await aave_strategy.get_borrowing_positions(USER_ADDRESS)
+        # Unchanged API: a second getter still costs a second enumeration...
+        assert provider.call_counts["getAllReservesTokens"] == 2
+        assert provider.call_counts["getUserReserveData"] == 4
+
+        # ...which is exactly what the combined accessor avoids
+        provider.call_counts.clear()
+        await aave_strategy.get_positions(USER_ADDRESS)
+        assert provider.call_counts["getAllReservesTokens"] == 1
+        assert provider.call_counts["getUserReserveData"] == 2
+
+    async def test_per_reserve_calls_are_issued_concurrently(
+        self, aave_strategy: AaveV3, aave_node: FakeAaveNode
+    ) -> None:
+        """All per-reserve lookups overlap; a sequential loop never exceeds 1."""
+        provider = instrument(aave_strategy, aave_node, idle_reserves=10)
+
+        lending, borrowing = await aave_strategy.get_positions(USER_ADDRESS)
+
+        assert provider.call_counts["getUserReserveData"] == 12
+        assert provider.max_in_flight["getUserReserveData"] == 12
+        # Idle reserves hold nothing, so the position lists are unaffected
+        assert len(lending) == 1
+        assert len(borrowing) == 2
+
+    async def test_lending_getter_fans_out(
+        self, aave_strategy: AaveV3, aave_node: FakeAaveNode
+    ) -> None:
+        provider = instrument(aave_strategy, aave_node, idle_reserves=5)
+
+        await aave_strategy.get_lending_positions(USER_ADDRESS)
+
+        assert provider.max_in_flight["getUserReserveData"] == 7
+
+    async def test_borrowing_getter_fans_out(
+        self, aave_strategy: AaveV3, aave_node: FakeAaveNode
+    ) -> None:
+        provider = instrument(aave_strategy, aave_node, idle_reserves=5)
+
+        await aave_strategy.get_borrowing_positions(USER_ADDRESS)
+
+        assert provider.max_in_flight["getUserReserveData"] == 7
+
+    async def test_combined_accessor_matches_the_single_sided_getters(
+        self, aave_strategy: AaveV3, aave_node: FakeAaveNode
+    ) -> None:
+        """Behaviour preserved: same positions, in the same order."""
+        instrument(aave_strategy, aave_node, idle_reserves=3)
+
+        lending, borrowing = await aave_strategy.get_positions(USER_ADDRESS)
+        expected_lending = await aave_strategy.get_lending_positions(USER_ADDRESS)
+        expected_borrowing = await aave_strategy.get_borrowing_positions(USER_ADDRESS)
+
+        assert lending_summary(lending) == lending_summary(expected_lending)
+        assert borrowing_summary(borrowing) == borrowing_summary(expected_borrowing)
+
+    async def test_enumeration_preserves_reserve_order(
+        self, aave_strategy: AaveV3, aave_node: FakeAaveNode
+    ) -> None:
+        """Concurrency must not reshuffle results onto the wrong reserves."""
+        provider = instrument(aave_strategy, aave_node, idle_reserves=6)
+
+        entries = await aave_strategy._iter_user_reserves(USER_ADDRESS)
+
+        assert [
+            (symbol, address) for symbol, address, _ in entries
+        ] == provider.reserves
+        assert entries[0][2] == tuple(aave_node.user_reserve_data[USDC_ADDRESS.lower()])
+        assert entries[1][2] == tuple(aave_node.user_reserve_data[WETH_ADDRESS.lower()])
+        assert all(entry[2] == IDLE_USER_RESERVE for entry in entries[2:])
 
 
 # === Transaction building ===
