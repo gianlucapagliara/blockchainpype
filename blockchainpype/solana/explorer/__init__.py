@@ -1,8 +1,11 @@
 """
-This package provides integrations with various Ethereum blockchain explorers.
-Currently supports Etherscan for transaction tracking and blockchain data retrieval.
+This package provides integrations with Solana blockchain explorers.
+Currently supports Solscan for transaction, account, token, and block links.
 """
 
-from blockchainpype.evm.explorer.etherscan import EtherscanExplorer
+from blockchainpype.solana.explorer.solscan import (
+    SolscanConfiguration,
+    SolscanExplorer,
+)
 
-__all__ = ["EtherscanExplorer"]
+__all__ = ["SolscanConfiguration", "SolscanExplorer"]

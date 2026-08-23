@@ -1,5 +1,3 @@
-from typing import cast
-
 from financepype.operators.blockchains.models import BlockchainConfiguration
 from financepype.operators.factory import OperatorFactory
 from financepype.owners.wallet import (
@@ -26,6 +24,17 @@ class BlockchainFactory(OperatorFactory):
     """
 
     _blockchain_classes: dict[BlockchainType, type[Blockchain]] = {}
+
+    @classmethod
+    def reset(cls) -> None:
+        """Reset the factory to its initial state.
+
+        In addition to the operator cache, class mapping, and configurations
+        cleared by OperatorFactory.reset(), this also clears the per-type
+        blockchain class registrations. Useful for testing.
+        """
+        super().reset()
+        cls._blockchain_classes.clear()
 
     @classmethod
     def register_blockchain_class_for_type(
@@ -59,13 +68,47 @@ class BlockchainFactory(OperatorFactory):
 
     @classmethod
     def get_evm_blockchain_by_identifier(cls, identifier: str) -> EthereumBlockchain:
-        """Get an EVM blockchain instance by its identifier."""
-        return cast(EthereumBlockchain, cls.get_by_identifier(identifier))
+        """Get an EVM blockchain instance by its identifier.
+
+        Args:
+            identifier: The platform identifier of the blockchain to retrieve
+
+        Returns:
+            EthereumBlockchain: The EVM blockchain instance
+
+        Raises:
+            ValueError: If no blockchain is registered for the identifier
+            TypeError: If the registered blockchain is not an EVM blockchain
+        """
+        blockchain = cls.get_by_identifier(identifier)
+        if not isinstance(blockchain, EthereumBlockchain):
+            raise TypeError(
+                f"Blockchain '{identifier}' is not an EVM blockchain "
+                f"(got {type(blockchain).__name__})"
+            )
+        return blockchain
 
     @classmethod
     def get_solana_blockchain_by_identifier(cls, identifier: str) -> SolanaBlockchain:
-        """Get a Solana blockchain instance by its identifier."""
-        return cast(SolanaBlockchain, cls.get_by_identifier(identifier))
+        """Get a Solana blockchain instance by its identifier.
+
+        Args:
+            identifier: The platform identifier of the blockchain to retrieve
+
+        Returns:
+            SolanaBlockchain: The Solana blockchain instance
+
+        Raises:
+            ValueError: If no blockchain is registered for the identifier
+            TypeError: If the registered blockchain is not a Solana blockchain
+        """
+        blockchain = cls.get_by_identifier(identifier)
+        if not isinstance(blockchain, SolanaBlockchain):
+            raise TypeError(
+                f"Blockchain '{identifier}' is not a Solana blockchain "
+                f"(got {type(blockchain).__name__})"
+            )
+        return blockchain
 
 
 class WalletRegistry:
@@ -97,6 +140,28 @@ class WalletRegistry:
         cls._configurations[identifier] = config
 
     @classmethod
+    def unregister(cls, identifier: str) -> None:
+        """Remove a wallet configuration from the registry.
+
+        Args:
+            identifier: The identifier of the configuration to remove
+
+        Raises:
+            ValueError: If no configuration is registered for the identifier
+        """
+        if identifier not in cls._configurations:
+            raise ValueError(f"Wallet configuration not found for {identifier}")
+        del cls._configurations[identifier]
+
+    @classmethod
+    def reset(cls) -> None:
+        """Reset the registry to its initial state, removing all configurations.
+
+        Useful for testing or when a complete reset is needed.
+        """
+        cls._configurations.clear()
+
+    @classmethod
     def get(cls, identifier: str) -> BlockchainWalletConfiguration | None:
         """Get a wallet configuration by its identifier."""
         return cls._configurations.get(identifier)
@@ -122,11 +187,28 @@ class WalletFactory:
     _wallet_instances: dict[str, BlockchainWallet] = {}
 
     @classmethod
+    def reset(cls) -> None:
+        """Reset the factory to its initial state.
+
+        This clears both the wallet instance cache and the registered wallet
+        classes. Useful for testing or when a complete reset is needed.
+        """
+        cls._wallet_classes.clear()
+        cls._wallet_instances.clear()
+
+    @classmethod
     def register_wallet_class(
         cls, blockchain_type: BlockchainType, wallet_class: type[BlockchainWallet]
     ) -> None:
         """Register a new wallet class for a specific blockchain type."""
         cls._wallet_classes[blockchain_type] = wallet_class
+
+    @classmethod
+    def get_wallet_class(
+        cls, blockchain_type: BlockchainType
+    ) -> type[BlockchainWallet] | None:
+        """Get the wallet class registered for a blockchain type, if any."""
+        return cls._wallet_classes.get(blockchain_type)
 
     @classmethod
     def create(cls, identifier: BlockchainWalletIdentifier | str) -> BlockchainWallet:
@@ -150,22 +232,15 @@ class WalletFactory:
             else identifier
         )
 
-        if identifier in cls._wallet_instances:
-            return cls._wallet_instances[identifier]
+        cached = cls._wallet_instances.get(identifier)
+        if cached is not None:
+            return cached
 
         config = WalletRegistry.get(identifier)
         if not config:
             raise ValueError(f"Wallet configuration not found for {identifier}")
 
-        wallet_class = cls._wallet_classes.get(config.identifier.platform.type)
-        if not wallet_class:
-            raise ValueError(
-                f"Wallet class not found for blockchain type {config.identifier.platform.type}"
-            )
-
-        instance = wallet_class(configuration=config)
-        cls._wallet_instances[identifier] = instance
-        return instance
+        return cls._create_instance(config)
 
     @classmethod
     def create_from_config(
@@ -184,12 +259,38 @@ class WalletFactory:
 
         Raises:
             ValueError: If no wallet class is found for the blockchain type
+            ValueError: If a cached instance exists for the same identifier but
+                was created from a different configuration
         """
         identifier = config.identifier.identifier
 
-        if identifier in cls._wallet_instances:
-            return cls._wallet_instances[identifier]
+        cached = cls._wallet_instances.get(identifier)
+        if cached is not None:
+            if cached.configuration != config:
+                raise ValueError(
+                    f"A wallet instance for {identifier} already exists with a "
+                    "different configuration. Reset the factory or reuse the "
+                    "original configuration."
+                )
+            return cached
 
+        return cls._create_instance(config)
+
+    @classmethod
+    def _create_instance(
+        cls, config: BlockchainWalletConfiguration
+    ) -> BlockchainWallet:
+        """Instantiate and cache a wallet for the given configuration.
+
+        Args:
+            config: The wallet configuration to use
+
+        Returns:
+            The newly created wallet instance
+
+        Raises:
+            ValueError: If no wallet class is found for the blockchain type
+        """
         wallet_class = cls._wallet_classes.get(config.identifier.platform.type)
         if not wallet_class:
             raise ValueError(
@@ -197,7 +298,7 @@ class WalletFactory:
             )
 
         instance = wallet_class(configuration=config)
-        cls._wallet_instances[identifier] = instance
+        cls._wallet_instances[config.identifier.identifier] = instance
         return instance
 
     @classmethod

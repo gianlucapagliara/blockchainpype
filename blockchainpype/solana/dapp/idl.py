@@ -2,15 +2,57 @@
 This module provides classes for handling Solana program IDLs (Interface Description Language).
 It supports loading IDLs from different sources, including direct dictionaries and local files,
 with an extensible base class for implementing additional IDL sources.
+
+Two IDL layouts are supported throughout the dapp layer:
+
+- Real Anchor IDLs, where ``instructions`` is a **list** of instruction
+  definitions (e.g. ``common/idl/jupiter_dca.json``)
+- Simplified hand-written IDLs, where ``instructions`` is a **dict** keyed by
+  instruction name (e.g. ``common/idl/solend.json``)
 """
 
 import json
 import os
 from abc import abstractmethod
+from typing import Any
 
 from pydantic import BaseModel, Field
 
 from blockchainpype import common_idl_path
+
+
+def find_idl_instruction(idl: dict[str, Any], name: str) -> dict[str, Any] | None:
+    """
+    Look up an instruction definition in an IDL by name.
+
+    Supports both real Anchor IDLs (``instructions`` as a list of definition
+    dicts) and simplified IDLs (``instructions`` as a dict keyed by name).
+
+    Args:
+        idl (dict[str, Any]): The parsed IDL document
+        name (str): The instruction name to look up
+
+    Returns:
+        dict[str, Any] | None: The instruction definition, or None if not found
+    """
+    instructions = idl.get("instructions")
+
+    if isinstance(instructions, list):
+        for instruction in instructions:
+            if isinstance(instruction, dict) and instruction.get("name") == name:
+                return instruction
+        return None
+
+    if isinstance(instructions, dict):
+        if name not in instructions:
+            return None
+        instruction = instructions[name]
+        if isinstance(instruction, dict):
+            return instruction
+        # Bare entries (e.g. {"transfer": null}) still identify a valid name
+        return {"name": name}
+
+    return None
 
 
 class SolanaIDL(BaseModel):
@@ -22,7 +64,7 @@ class SolanaIDL(BaseModel):
     """
 
     @abstractmethod
-    async def get_idl(self) -> dict[str, object]:
+    async def get_idl(self) -> dict[str, Any]:
         """
         Retrieve the program IDL.
 
@@ -46,9 +88,9 @@ class SolanaDictIDL(SolanaIDL):
         idl (dict): The program IDL stored as a dictionary
     """
 
-    idl: dict[str, object]
+    idl: dict[str, Any]
 
-    async def get_idl(self) -> dict[str, object]:
+    async def get_idl(self) -> dict[str, Any]:
         """
         Retrieve the program IDL from the stored dictionary.
 
@@ -83,7 +125,7 @@ class SolanaLocalFileIDL(SolanaIDL):
         """
         return os.path.join(self.folder_path, self.file_name)
 
-    async def get_idl(self) -> dict[str, object]:
+    async def get_idl(self) -> dict[str, Any]:
         """
         Load and retrieve the program IDL from the local file.
 
@@ -93,7 +135,16 @@ class SolanaLocalFileIDL(SolanaIDL):
         Raises:
             FileNotFoundError: If the IDL file doesn't exist
             json.JSONDecodeError: If the file contains invalid JSON
+            ValueError: If the file doesn't contain a JSON object
         """
         with open(self.file_path) as file:
-            result: dict[str, object] = json.load(file)
-            return result
+            data: Any = json.load(file)
+
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"Invalid IDL format in file {self.file_path}. "
+                "Expected a JSON object with an 'instructions' field."
+            )
+
+        result: dict[str, Any] = data
+        return result

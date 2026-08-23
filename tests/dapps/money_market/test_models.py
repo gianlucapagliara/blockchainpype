@@ -2,7 +2,7 @@
 Unit tests for money market models.
 
 This module tests:
-- Model validation and constraints
+- Model validation and constraints with REAL financepype assets
 - Data consistency checks
 - Property calculations
 - Edge cases and error conditions
@@ -13,8 +13,7 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
-from blockchainpype.dapps.money_market.models import (
-    BlockchainAsset,
+from blockchainpype.dapps.money_market import (
     BorrowingPosition,
     CollateralMode,
     InterestRateMode,
@@ -27,25 +26,27 @@ from blockchainpype.dapps.money_market.models import (
 )
 
 
-class MockAsset(BlockchainAsset):
-    """Mock asset for testing."""
-
-    def __init__(self, symbol: str, decimals: int):
-        super().__init__()
-        self.symbol = symbol
-        self.decimals = decimals
-
-
-@pytest.fixture
-def usdc_asset():
-    """Create a mock USDC asset."""
-    return MockAsset("USDC", 6)
-
-
-@pytest.fixture
-def weth_asset():
-    """Create a mock WETH asset."""
-    return MockAsset("WETH", 18)
+def make_market_data(asset, **overrides) -> MarketData:
+    """Build a valid MarketData, overriding selected fields."""
+    values = {
+        "asset": asset,
+        "supply_apy": Decimal("0.05"),
+        "variable_borrow_apy": Decimal("0.08"),
+        "stable_borrow_apy": Decimal("0.07"),
+        "total_supply": Decimal("1000000"),
+        "total_borrows": Decimal("500000"),
+        "utilization_rate": Decimal("0.5"),
+        "liquidity_rate": Decimal("0.05"),
+        "liquidation_threshold": Decimal("0.8"),
+        "loan_to_value": Decimal("0.75"),
+        "reserve_factor": Decimal("0.1"),
+        "is_borrowing_enabled": True,
+        "is_stable_rate_enabled": True,
+        "is_frozen": False,
+        "protocol": "Aave V3",
+    }
+    values.update(overrides)
+    return MarketData(**values)
 
 
 class TestEnums:
@@ -108,28 +109,10 @@ class TestProtocolConfiguration:
 class TestMoneyMarketConfiguration:
     """Test MoneyMarketConfiguration model."""
 
-    @pytest.fixture
-    def sample_protocol(self):
-        """Create a sample protocol configuration."""
-        return ProtocolConfiguration(
-            protocol_name="Aave V3",
-            lending_pool_address="0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2",
-            data_provider_address="0x7B4EB56E7CD4b454BA8ff71E4518426369a138a3",
-        )
-
-    def test_valid_money_market_configuration(self, sample_protocol):
+    def test_valid_money_market_configuration(self, sample_protocol, dapp_platform):
         """Test creating a valid money market configuration."""
-        from financepype.operators.blockchains.models import BlockchainPlatform
-
-        from blockchainpype.initializer import SupportedBlockchainType
-
-        platform = BlockchainPlatform(
-            identifier="ethereum",
-            type=SupportedBlockchainType.EVM.value,
-            chain_id=1,
-        )
         config = MoneyMarketConfiguration(
-            platform=platform,
+            platform=dapp_platform,
             protocols=[sample_protocol],
             default_interest_rate_mode=InterestRateMode.VARIABLE,
             default_collateral_mode=CollateralMode.ENABLED,
@@ -141,19 +124,10 @@ class TestMoneyMarketConfiguration:
         assert config.default_collateral_mode == CollateralMode.ENABLED
         assert config.liquidation_threshold_buffer == Decimal("0.05")
 
-    def test_default_values(self, sample_protocol):
+    def test_default_values(self, sample_protocol, dapp_platform):
         """Test default values in money market configuration."""
-        from financepype.operators.blockchains.models import BlockchainPlatform
-
-        from blockchainpype.initializer import SupportedBlockchainType
-
-        platform = BlockchainPlatform(
-            identifier="ethereum",
-            type=SupportedBlockchainType.EVM.value,
-            chain_id=1,
-        )
         config = MoneyMarketConfiguration(
-            platform=platform, protocols=[sample_protocol]
+            platform=dapp_platform, protocols=[sample_protocol]
         )
 
         assert config.default_interest_rate_mode == InterestRateMode.VARIABLE
@@ -162,7 +136,7 @@ class TestMoneyMarketConfiguration:
 
 
 class TestLendingPosition:
-    """Test LendingPosition model."""
+    """Test LendingPosition model with real financepype assets."""
 
     def test_valid_lending_position(self, usdc_asset):
         """Test creating a valid lending position."""
@@ -176,11 +150,53 @@ class TestLendingPosition:
         )
 
         assert position.asset == usdc_asset
+        assert position.asset.data.symbol == "USDC"
+        assert position.asset.data.decimals == 6
         assert position.supplied_amount == Decimal("1000.50")
         assert position.accrued_interest == Decimal("25.75")
         assert position.apy == Decimal("0.05")
         assert position.is_collateral is True
         assert position.protocol == "Aave V3"
+
+    def test_lending_position_with_evm_asset(self):
+        """A real EVM asset (EthereumNativeAsset) must be accepted."""
+        from blockchainpype.evm.asset import EthereumNativeAsset
+        from tests.dapps.helpers import build_platform
+
+        eth = EthereumNativeAsset(platform=build_platform())
+        position = LendingPosition(
+            asset=eth,
+            supplied_amount=Decimal("2"),
+            accrued_interest=Decimal("0.01"),
+            apy=Decimal("0.02"),
+            is_collateral=True,
+            protocol="Aave V3",
+        )
+
+        assert position.asset is eth
+        assert position.asset.data.symbol == "ETH"
+
+    def test_non_asset_rejected(self):
+        """Objects that are not financepype assets must be rejected."""
+
+        class NotAnAsset:
+            symbol = "FAKE"
+            decimals = 18
+
+        with pytest.raises(ValidationError):
+            LendingPosition(
+                asset=NotAnAsset(),
+                supplied_amount=Decimal("1000"),
+                accrued_interest=Decimal("25"),
+                apy=Decimal("0.05"),
+                is_collateral=True,
+                protocol="Aave V3",
+            )
+
+    def test_asset_conversion_round_trip(self, usdc_asset):
+        """The real asset exposes raw/decimal conversion helpers."""
+        assert usdc_asset.convert_to_raw(Decimal("1.5")) == 1_500_000
+        assert usdc_asset.convert_to_decimals(1_500_000) == Decimal("1.5")
 
     def test_total_balance_calculation(self, usdc_asset):
         """Test total balance calculation."""
@@ -223,7 +239,7 @@ class TestLendingPosition:
 
 
 class TestBorrowingPosition:
-    """Test BorrowingPosition model."""
+    """Test BorrowingPosition model with real financepype assets."""
 
     def test_valid_borrowing_position(self, weth_asset):
         """Test creating a valid borrowing position."""
@@ -237,6 +253,7 @@ class TestBorrowingPosition:
         )
 
         assert position.asset == weth_asset
+        assert position.asset.data.symbol == "WETH"
         assert position.borrowed_amount == Decimal("0.5")
         assert position.accrued_interest == Decimal("0.01")
         assert position.interest_rate_mode == InterestRateMode.VARIABLE
@@ -258,27 +275,11 @@ class TestBorrowingPosition:
 
 
 class TestMarketData:
-    """Test MarketData model."""
+    """Test MarketData model with real financepype assets."""
 
     def test_valid_market_data(self, usdc_asset):
         """Test creating valid market data."""
-        market_data = MarketData(
-            asset=usdc_asset,
-            supply_apy=Decimal("0.05"),
-            variable_borrow_apy=Decimal("0.08"),
-            stable_borrow_apy=Decimal("0.07"),
-            total_supply=Decimal("1000000"),
-            total_borrows=Decimal("500000"),
-            utilization_rate=Decimal("0.5"),
-            liquidity_rate=Decimal("0.05"),
-            liquidation_threshold=Decimal("0.8"),
-            loan_to_value=Decimal("0.75"),
-            reserve_factor=Decimal("0.1"),
-            is_borrowing_enabled=True,
-            is_stable_rate_enabled=True,
-            is_frozen=False,
-            protocol="Aave V3",
-        )
+        market_data = make_market_data(usdc_asset)
 
         assert market_data.asset == usdc_asset
         assert market_data.supply_apy == Decimal("0.05")
@@ -287,120 +288,42 @@ class TestMarketData:
 
     def test_utilization_rate_validation_lower_bound(self, usdc_asset):
         """Test utilization rate validation - lower bound."""
-        with pytest.raises(ValidationError) as exc_info:
-            MarketData(
-                asset=usdc_asset,
-                supply_apy=Decimal("0.05"),
-                variable_borrow_apy=Decimal("0.08"),
-                stable_borrow_apy=Decimal("0.07"),
-                total_supply=Decimal("1000000"),
-                total_borrows=Decimal("500000"),
-                utilization_rate=Decimal("-0.1"),  # Invalid: negative
-                liquidity_rate=Decimal("0.05"),
-                liquidation_threshold=Decimal("0.8"),
-                loan_to_value=Decimal("0.75"),
-                reserve_factor=Decimal("0.1"),
-                is_borrowing_enabled=True,
-                is_stable_rate_enabled=True,
-                is_frozen=False,
-                protocol="Aave V3",
-            )
-
-        assert "Utilization rate must be between 0 and 1" in str(exc_info.value)
+        with pytest.raises(
+            ValidationError, match="Utilization rate must be between 0 and 1"
+        ):
+            make_market_data(usdc_asset, utilization_rate=Decimal("-0.1"))
 
     def test_utilization_rate_validation_upper_bound(self, usdc_asset):
         """Test utilization rate validation - upper bound."""
-        with pytest.raises(ValidationError) as exc_info:
-            MarketData(
-                asset=usdc_asset,
-                supply_apy=Decimal("0.05"),
-                variable_borrow_apy=Decimal("0.08"),
-                stable_borrow_apy=Decimal("0.07"),
-                total_supply=Decimal("1000000"),
-                total_borrows=Decimal("500000"),
-                utilization_rate=Decimal("1.5"),  # Invalid: > 1
-                liquidity_rate=Decimal("0.05"),
-                liquidation_threshold=Decimal("0.8"),
-                loan_to_value=Decimal("0.75"),
-                reserve_factor=Decimal("0.1"),
-                is_borrowing_enabled=True,
-                is_stable_rate_enabled=True,
-                is_frozen=False,
-                protocol="Aave V3",
-            )
-
-        assert "Utilization rate must be between 0 and 1" in str(exc_info.value)
+        with pytest.raises(
+            ValidationError, match="Utilization rate must be between 0 and 1"
+        ):
+            make_market_data(usdc_asset, utilization_rate=Decimal("1.5"))
 
     def test_liquidation_threshold_validation(self, usdc_asset):
         """Test liquidation threshold validation."""
-        with pytest.raises(ValidationError) as exc_info:
-            MarketData(
-                asset=usdc_asset,
-                supply_apy=Decimal("0.05"),
-                variable_borrow_apy=Decimal("0.08"),
-                stable_borrow_apy=Decimal("0.07"),
-                total_supply=Decimal("1000000"),
-                total_borrows=Decimal("500000"),
-                utilization_rate=Decimal("0.5"),
-                liquidity_rate=Decimal("0.05"),
-                liquidation_threshold=Decimal("1.5"),  # Invalid: > 1
-                loan_to_value=Decimal("0.75"),
-                reserve_factor=Decimal("0.1"),
-                is_borrowing_enabled=True,
-                is_stable_rate_enabled=True,
-                is_frozen=False,
-                protocol="Aave V3",
-            )
-
-        assert "Liquidation threshold must be between 0 and 1" in str(exc_info.value)
+        with pytest.raises(
+            ValidationError, match="Liquidation threshold must be between 0 and 1"
+        ):
+            make_market_data(usdc_asset, liquidation_threshold=Decimal("1.5"))
 
     def test_loan_to_value_validation(self, usdc_asset):
         """Test loan to value validation."""
-        with pytest.raises(ValidationError) as exc_info:
-            MarketData(
-                asset=usdc_asset,
-                supply_apy=Decimal("0.05"),
-                variable_borrow_apy=Decimal("0.08"),
-                stable_borrow_apy=Decimal("0.07"),
-                total_supply=Decimal("1000000"),
-                total_borrows=Decimal("500000"),
-                utilization_rate=Decimal("0.5"),
-                liquidity_rate=Decimal("0.05"),
-                liquidation_threshold=Decimal("0.8"),
-                loan_to_value=Decimal("-0.1"),  # Invalid: negative
-                reserve_factor=Decimal("0.1"),
-                is_borrowing_enabled=True,
-                is_stable_rate_enabled=True,
-                is_frozen=False,
-                protocol="Aave V3",
-            )
-
-        assert "Loan to value must be between 0 and 1" in str(exc_info.value)
+        with pytest.raises(
+            ValidationError, match="Loan to value must be between 0 and 1"
+        ):
+            make_market_data(usdc_asset, loan_to_value=Decimal("-0.1"))
 
     def test_ltv_exceeds_liquidation_threshold_validation(self, usdc_asset):
         """Test that LTV cannot exceed liquidation threshold."""
-        with pytest.raises(ValidationError) as exc_info:
-            MarketData(
-                asset=usdc_asset,
-                supply_apy=Decimal("0.05"),
-                variable_borrow_apy=Decimal("0.08"),
-                stable_borrow_apy=Decimal("0.07"),
-                total_supply=Decimal("1000000"),
-                total_borrows=Decimal("500000"),
-                utilization_rate=Decimal("0.5"),
-                liquidity_rate=Decimal("0.05"),
+        with pytest.raises(
+            ValidationError, match="Loan to value cannot exceed liquidation threshold"
+        ):
+            make_market_data(
+                usdc_asset,
                 liquidation_threshold=Decimal("0.75"),
-                loan_to_value=Decimal("0.8"),  # Invalid: LTV > liquidation threshold
-                reserve_factor=Decimal("0.1"),
-                is_borrowing_enabled=True,
-                is_stable_rate_enabled=True,
-                is_frozen=False,
-                protocol="Aave V3",
+                loan_to_value=Decimal("0.8"),
             )
-
-        assert "Loan to value cannot exceed liquidation threshold" in str(
-            exc_info.value
-        )
 
 
 class TestUserAccountData:
@@ -425,7 +348,6 @@ class TestUserAccountData:
 
     def test_is_healthy_property(self):
         """Test is_healthy property calculation."""
-        # Healthy account
         healthy_account = UserAccountData(
             total_collateral_value=Decimal("10000"),
             total_debt_value=Decimal("5000"),
@@ -437,7 +359,6 @@ class TestUserAccountData:
         )
         assert healthy_account.is_healthy is True
 
-        # Unhealthy account
         unhealthy_account = UserAccountData(
             total_collateral_value=Decimal("10000"),
             total_debt_value=Decimal("9500"),
@@ -449,54 +370,24 @@ class TestUserAccountData:
         )
         assert unhealthy_account.is_healthy is False
 
-    def test_liquidation_risk_level_low(self):
-        """Test liquidation risk level - LOW."""
+    @pytest.mark.parametrize(
+        ("health_factor", "expected_level"),
+        [
+            (Decimal("2.5"), "LOW"),
+            (Decimal("1.7"), "MEDIUM"),
+            (Decimal("1.3"), "HIGH"),
+            (Decimal("1.05"), "CRITICAL"),
+        ],
+    )
+    def test_liquidation_risk_levels(self, health_factor, expected_level):
+        """Test liquidation risk level boundaries."""
         account_data = UserAccountData(
             total_collateral_value=Decimal("10000"),
-            total_debt_value=Decimal("2000"),
-            available_borrow_value=Decimal("5000"),
-            current_liquidation_threshold=Decimal("0.8"),
-            loan_to_value=Decimal("0.75"),
-            health_factor=Decimal("2.5"),
-            protocol="Aave V3",
-        )
-        assert account_data.liquidation_risk_level == "LOW"
-
-    def test_liquidation_risk_level_medium(self):
-        """Test liquidation risk level - MEDIUM."""
-        account_data = UserAccountData(
-            total_collateral_value=Decimal("10000"),
-            total_debt_value=Decimal("4000"),
-            available_borrow_value=Decimal("3000"),
-            current_liquidation_threshold=Decimal("0.8"),
-            loan_to_value=Decimal("0.75"),
-            health_factor=Decimal("1.7"),
-            protocol="Aave V3",
-        )
-        assert account_data.liquidation_risk_level == "MEDIUM"
-
-    def test_liquidation_risk_level_high(self):
-        """Test liquidation risk level - HIGH."""
-        account_data = UserAccountData(
-            total_collateral_value=Decimal("10000"),
-            total_debt_value=Decimal("6000"),
+            total_debt_value=Decimal("5000"),
             available_borrow_value=Decimal("1000"),
             current_liquidation_threshold=Decimal("0.8"),
             loan_to_value=Decimal("0.75"),
-            health_factor=Decimal("1.3"),
+            health_factor=health_factor,
             protocol="Aave V3",
         )
-        assert account_data.liquidation_risk_level == "HIGH"
-
-    def test_liquidation_risk_level_critical(self):
-        """Test liquidation risk level - CRITICAL."""
-        account_data = UserAccountData(
-            total_collateral_value=Decimal("10000"),
-            total_debt_value=Decimal("9000"),
-            available_borrow_value=Decimal("0"),
-            current_liquidation_threshold=Decimal("0.8"),
-            loan_to_value=Decimal("0.75"),
-            health_factor=Decimal("1.05"),
-            protocol="Aave V3",
-        )
-        assert account_data.liquidation_risk_level == "CRITICAL"
+        assert account_data.liquidation_risk_level == expected_level

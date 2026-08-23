@@ -10,12 +10,14 @@ from typing import cast
 from eth_account.datastructures import SignedTransaction
 from eth_typing import BlockIdentifier
 from financepype.operations.transactions.models import (
+    BlockchainTransactionFee,
     BlockchainTransactionState,
     BlockchainTransactionUpdate,
 )
 from financepype.operators.blockchains.identifier import BlockchainIdentifier
 from financepype.platforms.blockchain import BlockchainType
 from web3 import AsyncWeb3
+from web3.exceptions import TransactionNotFound
 from web3.types import BlockData
 
 from blockchainpype.blockchain import Blockchain
@@ -47,7 +49,7 @@ class EthereumBlockchain(Blockchain):
 
     This class provides comprehensive functionality for interacting with Ethereum and
     EVM-compatible blockchains, including:
-    - Web3 client management for both RPC and WebSocket connections
+    - Web3 client management over JSON-RPC
     - Block and transaction data retrieval
     - Native asset (ETH) operations
     - Transaction sending and tracking
@@ -69,12 +71,16 @@ class EthereumBlockchain(Blockchain):
         """
         super().__init__(configuration)
 
+        # middleware=None preserves the Web3 default middleware stack; only an
+        # explicitly configured list (possibly empty) overrides it.
         self.web3 = AsyncWeb3(
             provider=configuration.connectivity.rpc_provider,
             middleware=configuration.connectivity.middleware,
             modules=configuration.connectivity.modules,
             external_modules=configuration.connectivity.external_modules,
         )
+        if configuration.connectivity.ens is not None:
+            self.web3.ens = configuration.connectivity.ens
 
         self._explorer = None
         if configuration.explorer is not None:
@@ -256,9 +262,15 @@ class EthereumBlockchain(Blockchain):
             transaction_id (EthereumTransactionHash): Transaction hash
 
         Returns:
-            EthereumTransactionReceipt | None: Transaction receipt if available
+            EthereumTransactionReceipt | None: Transaction receipt, or None when
+                the transaction is unknown to the node or not yet mined
         """
-        raw_receipt = await self.web3.eth.get_transaction_receipt(transaction_id.raw)
+        try:
+            raw_receipt = await self.web3.eth.get_transaction_receipt(
+                transaction_id.raw
+            )
+        except TransactionNotFound:
+            return None
         return EthereumTransactionReceipt.from_raw(raw_receipt)
 
     async def fetch_raw_transaction(
@@ -271,9 +283,13 @@ class EthereumBlockchain(Blockchain):
             transaction_id (EthereumTransactionHash): Transaction hash
 
         Returns:
-            EthereumRawTransaction | None: Raw transaction data if available
+            EthereumRawTransaction | None: Raw transaction data, or None when
+                the transaction is unknown to the node
         """
-        raw_transaction = await self.web3.eth.get_transaction(transaction_id.raw)
+        try:
+            raw_transaction = await self.web3.eth.get_transaction(transaction_id.raw)
+        except TransactionNotFound:
+            return None
         return EthereumRawTransaction.from_raw(raw_transaction)
 
     async def fetch_transaction(
@@ -289,7 +305,10 @@ class EthereumBlockchain(Blockchain):
             transaction_id (BlockchainIdentifier): Transaction identifier
 
         Returns:
-            EthereumTransaction | None: Complete transaction information if available
+            EthereumTransaction | None: Complete transaction information, or
+                None when the transaction is unknown to the node. Pending
+                transactions are reported as BROADCASTED, mined transactions as
+                CONFIRMED or FAILED depending on the receipt status
 
         Raises:
             ValueError: If the transaction ID is invalid
@@ -301,27 +320,44 @@ class EthereumBlockchain(Blockchain):
         if raw_transaction is None:
             return None
 
-        block_data = await self.fetch_block_data(raw_transaction.block_number)
-        ts = block_data["timestamp"] if "timestamp" in block_data else 0
+        if raw_transaction.block_number is not None:
+            block_data = await self.fetch_block_data(raw_transaction.block_number)
+            ts: float = block_data["timestamp"] if "timestamp" in block_data else 0
+        else:
+            # Pending transaction: not included in a block yet
+            ts = self.current_timestamp
 
         transaction_receipt = await self.fetch_transaction_receipt(transaction_id)
+
         fee = None
-        # if transaction_receipt is not None:
-        #     fee = BlockchainTransactionFee(
-        #         amount=transaction_receipt.fee_amount,
-        #         asset=...,
-        #     )
+        if transaction_receipt is not None:
+            fee = BlockchainTransactionFee(
+                amount=self.native_asset.convert_to_decimals(
+                    int(transaction_receipt.fee_amount)
+                ),
+                asset=self.native_asset,
+            )
+
+        if transaction_receipt is None:
+            current_state = BlockchainTransactionState.BROADCASTED
+        elif transaction_receipt.status == 0:
+            current_state = BlockchainTransactionState.FAILED
+        else:
+            # Post-Byzantium receipts carry status=1 on success; pre-Byzantium
+            # receipts have no status field, and inclusion implies success.
+            current_state = BlockchainTransactionState.CONFIRMED
 
         transaction = EthereumTransaction(
             client_operation_id=transaction_id.string,
             operator_operation_id=transaction_id,
             owner_identifier=EthereumWalletIdentifier(
                 platform=self.configuration.platform,
+                name=None,
                 address=raw_transaction.sender,
             ),
             creation_timestamp=ts,
             last_update_timestamp=ts,
-            current_state=BlockchainTransactionState.CONFIRMED,
+            current_state=current_state,
             raw_transaction=raw_transaction,
             receipt=transaction_receipt,
             fee=fee,

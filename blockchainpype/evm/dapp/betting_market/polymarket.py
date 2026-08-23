@@ -324,8 +324,8 @@ class Polymarket(ProtocolImplementation):
         elif market_data.get("resolved", False):
             status = MarketStatus.RESOLVED
 
-        # Create collateral asset (USDC) - use mock for testing compatibility
-        from blockchainpype.dapps.betting_market.models import BlockchainAsset
+        # Create collateral asset (USDC)
+        from financepype.assets.blockchain import BlockchainAsset
 
         class USDCAsset(BlockchainAsset):
             def __init__(self) -> None:

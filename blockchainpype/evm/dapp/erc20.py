@@ -4,8 +4,9 @@ It implements the standard ERC-20 interface, including token transfers, allowanc
 and balance queries, with proper decimal handling and type safety.
 """
 
+import uuid
 from decimal import Decimal
-from typing import cast
+from typing import TYPE_CHECKING, Any, cast
 
 from pydantic import ConfigDict, Field
 
@@ -18,6 +19,9 @@ from blockchainpype.evm.dapp.contract import (
 )
 from blockchainpype.evm.transaction import EthereumTransaction
 
+if TYPE_CHECKING:
+    from blockchainpype.evm.wallet.wallet import EthereumWallet
+
 
 class ERC20ContractConfiguration(EthereumContractConfiguration):
     """
@@ -28,12 +32,13 @@ class ERC20ContractConfiguration(EthereumContractConfiguration):
 
     Attributes:
         address (EthereumAddress): The token contract's address
-        abi_configuration (EthereumABI): ABI configuration, defaults to standard ERC-20 ABI
+        abi_configuration (EthereumABI): ABI configuration, defaults to the
+            canonical ERC-20 interface ABI (ERC20.json)
     """
 
     address: EthereumAddress
     abi_configuration: EthereumABI = Field(
-        default_factory=lambda: EthereumLocalFileABI(file_name="ERC20Mock.json")
+        default_factory=lambda: EthereumLocalFileABI(file_name="ERC20.json")
     )
 
 
@@ -43,8 +48,24 @@ class ERC20Contract(EthereumSmartContract):
 
     This class provides methods for interacting with ERC-20 token contracts,
     including querying balances and allowances, and performing transfers.
-    All numeric values are handled as Decimal for precision.
+
+    Amount conventions: get_total_supply/get_balance_of/get_allowance return
+    decimal-adjusted (human-readable) amounts, dividing the on-chain value by
+    10**decimals; the get_raw_* accessors expose the untouched on-chain integer
+    amounts. The token's decimals are fetched once and cached.
     """
+
+    def __init__(self, configuration: EthereumContractConfiguration):
+        """
+        Initialize the ERC-20 contract interface.
+
+        Args:
+            configuration (EthereumContractConfiguration): Contract configuration
+                including address and ABI
+        """
+        super().__init__(configuration)
+
+        self._decimals: int | None = None
 
     async def get_name(self) -> str:
         """
@@ -61,96 +82,233 @@ class ERC20Contract(EthereumSmartContract):
     async def get_decimals(self) -> int:
         """
         Get the number of decimals of the token.
+
+        The contract is lazily initialized when needed, and the value is
+        fetched from the chain once and cached afterwards.
         """
-        return cast(int, await self.functions.decimals().call())
+        if self._decimals is None:
+            if not self.is_initialized:
+                await self.initialize()
+            self._decimals = cast(int, await self.functions.decimals().call())
+        return self._decimals
+
+    async def _to_decimal_amount(self, raw_amount: int) -> Decimal:
+        """Convert a raw on-chain amount to its decimal-adjusted representation."""
+        decimals = await self.get_decimals()
+        return Decimal(raw_amount) / Decimal(10**decimals)
+
+    async def _to_raw_amount(self, amount: Decimal) -> int:
+        """Convert a decimal-adjusted amount to its raw on-chain representation."""
+        decimals = await self.get_decimals()
+        return int(amount * (Decimal(10) ** decimals))
+
+    async def get_raw_total_supply(self) -> int:
+        """
+        Get the total supply of the token in raw (smallest) units.
+
+        Returns:
+            int: The total token supply in raw units
+        """
+        return cast(int, await self.functions.totalSupply().call())
 
     async def get_total_supply(self) -> Decimal:
         """
-        Get the total supply of the token.
+        Get the total supply of the token, adjusted by the token's decimals.
 
         Returns:
-            Decimal: The total token supply
+            Decimal: The decimal-adjusted total token supply
         """
-        raw_supply = await self.functions.totalSupply().call()
-        return Decimal(str(raw_supply))
+        return await self._to_decimal_amount(await self.get_raw_total_supply())
 
-    async def get_balance_of(self, address: EthereumAddress) -> Decimal:
+    async def get_raw_balance_of(self, address: EthereumAddress) -> int:
         """
-        Get the token balance of an address.
+        Get the token balance of an address in raw (smallest) units.
 
         Args:
             address (EthereumAddress): The address to check
 
         Returns:
-            Decimal: The token balance
+            int: The token balance in raw units
         """
-        raw_balance = await self.functions.balanceOf(address.raw).call()
-        return Decimal(str(raw_balance))
+        return cast(int, await self.functions.balanceOf(address.raw).call())
 
-    async def get_allowance(
-        self, owner: EthereumAddress, spender: EthereumAddress
-    ) -> Decimal:
+    async def get_balance_of(self, address: EthereumAddress) -> Decimal:
         """
-        Get the amount of tokens that a spender is allowed to spend on behalf of the owner.
+        Get the token balance of an address, adjusted by the token's decimals.
+
+        Args:
+            address (EthereumAddress): The address to check
+
+        Returns:
+            Decimal: The decimal-adjusted token balance
+        """
+        return await self._to_decimal_amount(await self.get_raw_balance_of(address))
+
+    async def get_raw_allowance(
+        self, owner: EthereumAddress, spender: EthereumAddress
+    ) -> int:
+        """
+        Get the approved spending amount in raw (smallest) units.
 
         Args:
             owner (EthereumAddress): The token owner's address
             spender (EthereumAddress): The spender's address
 
         Returns:
-            Decimal: The approved amount
+            int: The approved amount in raw units
         """
-        raw_allowance = await self.functions.allowance(owner.raw, spender.raw).call()
-        return Decimal(str(raw_allowance))
+        return cast(int, await self.functions.allowance(owner.raw, spender.raw).call())
 
-    async def place_transfer(
-        self, recipient: EthereumAddress, amount: Decimal
-    ) -> EthereumTransaction:
+    async def get_allowance(
+        self, owner: EthereumAddress, spender: EthereumAddress
+    ) -> Decimal:
         """
-        Create a transaction to transfer tokens to a recipient.
+        Get the amount of tokens that a spender is allowed to spend on behalf of
+        the owner, adjusted by the token's decimals.
 
         Args:
-            recipient (EthereumAddress): The recipient's address
-            amount (Decimal): The amount of tokens to transfer
+            owner (EthereumAddress): The token owner's address
+            spender (EthereumAddress): The spender's address
 
         Returns:
-            EthereumTransaction: The prepared transfer transaction
+            Decimal: The decimal-adjusted approved amount
         """
-        raise NotImplementedError
+        return await self._to_decimal_amount(
+            await self.get_raw_allowance(owner, spender)
+        )
 
-    async def place_transfer_from(
-        self, sender: EthereumAddress, recipient: EthereumAddress, amount: Decimal
+    async def _place_function_transaction(
+        self,
+        wallet: "EthereumWallet",
+        function_name: str,
+        args: list[Any],
+        client_operation_id: str | None,
     ) -> EthereumTransaction:
         """
-        Create a transaction to transfer tokens from one address to another.
+        Build, sign and broadcast a state-changing contract call.
+
+        The contract is lazily initialized, the wallet's nonce is synced when
+        needed, and the transaction is built via wallet.build_transaction so the
+        wallet's gas configuration applies.
+
+        Args:
+            wallet (EthereumWallet): The wallet signing and sending the transaction
+            function_name (str): Name of the contract function to call
+            args (list[Any]): Already-encoded (raw) function arguments
+            client_operation_id (str | None): Optional operation ID; generated
+                when not provided
+
+        Returns:
+            EthereumTransaction: The tracked, broadcast transaction
+        """
+        if not self.is_initialized:
+            await self.initialize()
+
+        function = self.functions[function_name](*args)
+        tx_data = await wallet.build_transaction(function=function)
+
+        if wallet.last_nonce is None:
+            await wallet.sync_nonce()
+
+        if client_operation_id is None:
+            client_operation_id = (
+                f"erc20-{function_name}-{self.address.string}-{uuid.uuid4().hex}"
+            )
+
+        return wallet.sign_and_send_transaction(
+            client_operation_id=client_operation_id,
+            tx_data=cast(dict[str, Any], dict(tx_data)),
+        )
+
+    async def place_transfer(
+        self,
+        wallet: "EthereumWallet",
+        recipient: EthereumAddress,
+        amount: Decimal,
+        client_operation_id: str | None = None,
+    ) -> EthereumTransaction:
+        """
+        Sign and broadcast a transaction transferring tokens to a recipient.
+
+        Args:
+            wallet (EthereumWallet): The wallet holding the tokens; the contract
+                configuration carries no wallet reference, so the signing wallet
+                must be passed explicitly
+            recipient (EthereumAddress): The recipient's address
+            amount (Decimal): The decimal-adjusted amount of tokens to transfer
+            client_operation_id (str | None): Optional operation ID for tracking
+
+        Returns:
+            EthereumTransaction: The tracked transfer transaction
+        """
+        raw_amount = await self._to_raw_amount(amount)
+        return await self._place_function_transaction(
+            wallet,
+            "transfer",
+            [recipient.raw, raw_amount],
+            client_operation_id,
+        )
+
+    async def place_transfer_from(
+        self,
+        wallet: "EthereumWallet",
+        sender: EthereumAddress,
+        recipient: EthereumAddress,
+        amount: Decimal,
+        client_operation_id: str | None = None,
+    ) -> EthereumTransaction:
+        """
+        Sign and broadcast a transaction transferring tokens between addresses.
 
         This method is used for transferring tokens on behalf of another address
         that has approved the spending.
 
         Args:
+            wallet (EthereumWallet): The wallet spending the approved allowance;
+                passed explicitly since the contract holds no wallet reference
             sender (EthereumAddress): The token owner's address
             recipient (EthereumAddress): The recipient's address
-            amount (Decimal): The amount of tokens to transfer
+            amount (Decimal): The decimal-adjusted amount of tokens to transfer
+            client_operation_id (str | None): Optional operation ID for tracking
 
         Returns:
-            EthereumTransaction: The prepared transfer transaction
+            EthereumTransaction: The tracked transfer transaction
         """
-        raise NotImplementedError
+        raw_amount = await self._to_raw_amount(amount)
+        return await self._place_function_transaction(
+            wallet,
+            "transferFrom",
+            [sender.raw, recipient.raw, raw_amount],
+            client_operation_id,
+        )
 
     async def place_approve(
-        self, spender: EthereumAddress, amount: Decimal
+        self,
+        wallet: "EthereumWallet",
+        spender: EthereumAddress,
+        amount: Decimal,
+        client_operation_id: str | None = None,
     ) -> EthereumTransaction:
         """
-        Create a transaction to approve a spender to spend tokens.
+        Sign and broadcast a transaction approving a spender to spend tokens.
 
         Args:
+            wallet (EthereumWallet): The wallet granting the approval; passed
+                explicitly since the contract holds no wallet reference
             spender (EthereumAddress): The address to approve
-            amount (Decimal): The amount of tokens to approve
+            amount (Decimal): The decimal-adjusted amount of tokens to approve
+            client_operation_id (str | None): Optional operation ID for tracking
 
         Returns:
-            EthereumTransaction: The prepared approval transaction
+            EthereumTransaction: The tracked approval transaction
         """
-        raise NotImplementedError
+        raw_amount = await self._to_raw_amount(amount)
+        return await self._place_function_transaction(
+            wallet,
+            "approve",
+            [spender.raw, raw_amount],
+            client_operation_id,
+        )
 
 
 class ERC20Token(EthereumAsset):
@@ -162,7 +320,7 @@ class ERC20Token(EthereumAsset):
     while providing access to its contract functionality.
 
     Attributes:
-        contract (ERC20Contract | None): The token's contract interface
+        contract (ERC20Contract): The token's contract interface
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True, frozen=False)

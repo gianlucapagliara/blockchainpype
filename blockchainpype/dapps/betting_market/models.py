@@ -3,15 +3,9 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any, Self
 
+from financepype.assets.blockchain import BlockchainAsset
 from financepype.operators.dapps.dapp import DecentralizedApplicationConfiguration
-from pydantic import BaseModel, ConfigDict, model_validator
-
-
-# Mock BlockchainAsset for testing purposes
-class BlockchainAsset:
-    """Mock blockchain asset class."""
-
-    pass
+from pydantic import BaseModel, model_validator
 
 
 class MarketStatus(StrEnum):
@@ -54,8 +48,6 @@ class BettingMarketConfiguration(DecentralizedApplicationConfiguration):
 class OutcomeToken(BaseModel):
     """Represents an outcome token in a prediction market."""
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
     token_id: str
     outcome_name: str
     token_address: str | None = None
@@ -88,8 +80,6 @@ class MarketOutcome(BaseModel):
 
 class BettingMarket(BaseModel):
     """Represents a betting/prediction market."""
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     market_id: str
     title: str
@@ -137,16 +127,24 @@ class BettingMarket(BaseModel):
         if self.status == MarketStatus.RESOLVED and not self.resolved_outcome_id:
             raise ValueError("Resolved markets must have a resolved outcome ID")
 
+        if self.resolved_outcome_id is not None:
+            outcome_ids = {outcome.outcome_id for outcome in self.outcomes}
+            if self.resolved_outcome_id not in outcome_ids:
+                raise ValueError(
+                    "Resolved outcome ID must reference an existing outcome"
+                )
+
         if self.end_date and self.end_date < self.creation_date:
             raise ValueError("End date cannot be before creation date")
+
+        if self.resolution_date and self.resolution_date < self.creation_date:
+            raise ValueError("Resolution date cannot be before creation date")
 
         return self
 
 
 class BettingPosition(BaseModel):
     """Represents a user's position in a betting market."""
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     market_id: str
     outcome_token: OutcomeToken

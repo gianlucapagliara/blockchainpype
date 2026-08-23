@@ -1,5 +1,6 @@
+from abc import ABC, abstractmethod
 from decimal import Decimal
-from typing import Protocol
+from typing import Protocol, cast
 
 from financepype.operations.transactions.transaction import BlockchainTransaction
 from financepype.operators.dapps.dapp import DecentralizedApplication
@@ -95,7 +96,7 @@ class ProtocolImplementation(Protocol):
         ...
 
 
-class BettingMarket(DecentralizedApplication):
+class BettingMarket(DecentralizedApplication, ABC):
     """Base class for betting market protocols like Polymarket."""
 
     def __init__(self, configuration: BettingMarketConfiguration):
@@ -104,13 +105,21 @@ class BettingMarket(DecentralizedApplication):
         self._protocol_strategies: dict[str, ProtocolImplementation] = {}
         self._initialize_protocols()
 
+    @abstractmethod
     def _initialize_protocols(self) -> None:
-        """Initialize protocol-specific strategies."""
-        raise NotImplementedError
+        """Initialize protocol-specific strategies.
+
+        Subclasses must populate ``self._protocol_strategies`` with
+        :class:`ProtocolImplementation` instances keyed by protocol name.
+        """
 
     @property
     def configuration(self) -> BettingMarketConfiguration:
         return self._configuration
+
+    @property
+    def current_timestamp(self) -> float:
+        return cast(float, self.blockchain.current_timestamp)
 
     @property
     def supported_protocols(self) -> list[str]:
