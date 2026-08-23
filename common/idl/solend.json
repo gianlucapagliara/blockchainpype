@@ -1,6 +1,29 @@
 {
     "version": "0.1.0",
     "name": "solend",
+    "programId": "So1endDq2YkqhipRh3WViPa8hdiSpxWy6z3Z6tMCpAo",
+    "docs": [
+        "Simplified (non-Anchor) IDL for the Solend lending program.",
+        "Solend instructions are encoded as a single-byte discriminant (the",
+        "instruction enum index from solend-program instruction.rs) followed by",
+        "little-endian fields. The 'discriminant' and 'args' entries below only",
+        "document that encoding: the dict-form IDL path of",
+        "SolanaProgram.create_instruction passes pre-encoded data through",
+        "unchanged, and blockchainpype/solana/dapp/money_market/solend.py is the",
+        "authoritative builder for data bytes and account metas.",
+        "The 'deposit' entry maps to",
+        "DepositReserveLiquidityAndObligationCollateral (discriminant 14, args:",
+        "liquidityAmount u64) with accounts: sourceLiquidity(w),",
+        "destinationCollateral(w), reserve(w), reserveLiquiditySupply(w),",
+        "reserveCollateralMint(w), lendingMarket, lendingMarketAuthority,",
+        "reserveCollateralSupply(w), obligation(w), obligationOwner(s),",
+        "pythOracle, switchboardOracle, userTransferAuthority(s), tokenProgram;",
+        "the entry itself is kept minimal for backward compatibility.",
+        "'enable_collateral' and 'disable_collateral' are NOT Solend",
+        "instructions (deposited liquidity is always active obligation",
+        "collateral); they are kept only as unsupported placeholders for",
+        "backward compatibility."
+    ],
     "instructions": {
         "deposit": {
             "name": "deposit",
@@ -8,27 +31,107 @@
         },
         "withdraw": {
             "name": "withdraw",
-            "accounts": []
+            "docs": [
+                "WithdrawObligationCollateralAndRedeemReserveCollateral"
+            ],
+            "discriminant": 15,
+            "args": [
+                {"name": "collateralAmount", "type": "u64"}
+            ],
+            "accounts": [
+                {"name": "sourceCollateral", "isMut": true, "isSigner": false},
+                {"name": "destinationCollateral", "isMut": true, "isSigner": false},
+                {"name": "withdrawReserve", "isMut": true, "isSigner": false},
+                {"name": "obligation", "isMut": true, "isSigner": false},
+                {"name": "lendingMarket", "isMut": false, "isSigner": false},
+                {"name": "lendingMarketAuthority", "isMut": false, "isSigner": false},
+                {"name": "destinationLiquidity", "isMut": true, "isSigner": false},
+                {"name": "reserveCollateralMint", "isMut": true, "isSigner": false},
+                {"name": "reserveLiquiditySupply", "isMut": true, "isSigner": false},
+                {"name": "obligationOwner", "isMut": false, "isSigner": true},
+                {"name": "userTransferAuthority", "isMut": false, "isSigner": true},
+                {"name": "tokenProgram", "isMut": false, "isSigner": false}
+            ]
         },
         "borrow": {
             "name": "borrow",
-            "accounts": []
+            "docs": [
+                "BorrowObligationLiquidity"
+            ],
+            "discriminant": 10,
+            "args": [
+                {"name": "liquidityAmount", "type": "u64"}
+            ],
+            "accounts": [
+                {"name": "sourceLiquidity", "isMut": true, "isSigner": false},
+                {"name": "destinationLiquidity", "isMut": true, "isSigner": false},
+                {"name": "borrowReserve", "isMut": true, "isSigner": false},
+                {"name": "borrowReserveLiquidityFeeReceiver", "isMut": true, "isSigner": false},
+                {"name": "obligation", "isMut": true, "isSigner": false},
+                {"name": "lendingMarket", "isMut": false, "isSigner": false},
+                {"name": "lendingMarketAuthority", "isMut": false, "isSigner": false},
+                {"name": "obligationOwner", "isMut": false, "isSigner": true},
+                {"name": "tokenProgram", "isMut": false, "isSigner": false}
+            ]
         },
         "repay": {
             "name": "repay",
-            "accounts": []
+            "docs": [
+                "RepayObligationLiquidity"
+            ],
+            "discriminant": 11,
+            "args": [
+                {"name": "liquidityAmount", "type": "u64"}
+            ],
+            "accounts": [
+                {"name": "sourceLiquidity", "isMut": true, "isSigner": false},
+                {"name": "destinationLiquidity", "isMut": true, "isSigner": false},
+                {"name": "repayReserve", "isMut": true, "isSigner": false},
+                {"name": "obligation", "isMut": true, "isSigner": false},
+                {"name": "lendingMarket", "isMut": false, "isSigner": false},
+                {"name": "userTransferAuthority", "isMut": false, "isSigner": true},
+                {"name": "tokenProgram", "isMut": false, "isSigner": false}
+            ]
         },
         "enable_collateral": {
             "name": "enable_collateral",
+            "docs": [
+                "Not a Solend instruction: deposited liquidity is always active",
+                "obligation collateral. Unsupported placeholder."
+            ],
             "accounts": []
         },
         "disable_collateral": {
             "name": "disable_collateral",
+            "docs": [
+                "Not a Solend instruction: deposited liquidity is always active",
+                "obligation collateral. Unsupported placeholder."
+            ],
             "accounts": []
         },
         "liquidate": {
             "name": "liquidate",
-            "accounts": []
+            "docs": [
+                "LiquidateObligation. Documented for completeness; not built by",
+                "the Solend strategy."
+            ],
+            "discriminant": 12,
+            "args": [
+                {"name": "liquidityAmount", "type": "u64"}
+            ],
+            "accounts": [
+                {"name": "sourceLiquidity", "isMut": true, "isSigner": false},
+                {"name": "destinationCollateral", "isMut": true, "isSigner": false},
+                {"name": "repayReserve", "isMut": true, "isSigner": false},
+                {"name": "repayReserveLiquiditySupply", "isMut": true, "isSigner": false},
+                {"name": "withdrawReserve", "isMut": false, "isSigner": false},
+                {"name": "withdrawReserveCollateralSupply", "isMut": true, "isSigner": false},
+                {"name": "obligation", "isMut": true, "isSigner": false},
+                {"name": "lendingMarket", "isMut": false, "isSigner": false},
+                {"name": "lendingMarketAuthority", "isMut": false, "isSigner": false},
+                {"name": "userTransferAuthority", "isMut": false, "isSigner": true},
+                {"name": "tokenProgram", "isMut": false, "isSigner": false}
+            ]
         }
     }
 }
