@@ -1,7 +1,37 @@
 require("@nomicfoundation/hardhat-toolbox");
 require("hardhat-gas-reporter");
 require("solidity-coverage");
-// require("dotenv").config(); // Load environment variables from .env file
+// Load environment variables from .env file (no-op when the file is missing)
+require("dotenv").config();
+
+const { subtask } = require("hardhat/config");
+const {
+  TASK_COMPILE_SOLIDITY_GET_SOLC_BUILD,
+} = require("hardhat/builtin-tasks/task-names");
+
+// Prefer the locally installed solcjs (node_modules/solc) when it matches the
+// configured compiler version. This avoids downloading compiler binaries,
+// which is impossible in offline/sandboxed environments and non-deterministic
+// in CI. Falls back to Hardhat's default downloader for other versions.
+const LOCAL_SOLC_VERSION = (() => {
+  try {
+    return require("solc/package.json").version;
+  } catch {
+    return null;
+  }
+})();
+
+subtask(TASK_COMPILE_SOLIDITY_GET_SOLC_BUILD, async (args, hre, runSuper) => {
+  if (LOCAL_SOLC_VERSION && args.solcVersion === LOCAL_SOLC_VERSION) {
+    return {
+      compilerPath: require.resolve("solc/soljson.js"),
+      isSolcJs: true,
+      version: LOCAL_SOLC_VERSION,
+      longVersion: LOCAL_SOLC_VERSION,
+    };
+  }
+  return runSuper(args);
+});
 
 // Chain configurations with RPC URL patterns and chain IDs
 const CHAIN_CONFIGS = {
@@ -121,7 +151,9 @@ const getForkingConfig = () => {
 /** @type import('hardhat/config').HardhatUserConfig */
 module.exports = {
   solidity: {
-    version: "0.8.20",
+    // Kept in sync with the solc version pinned in package-lock.json so the
+    // local-solcjs fast path above applies (see TASK_COMPILE_SOLIDITY_GET_SOLC_BUILD).
+    version: "0.8.26",
     settings: {
       optimizer: {
         enabled: true,
@@ -140,7 +172,9 @@ module.exports = {
       forking: getForkingConfig(),
     },
     localhost: {
-      url: "http://127.0.0.1:8545",
+      // Port overridable so test harnesses can target a dynamically
+      // allocated node port (see tests/evm/hardhat.py).
+      url: `http://127.0.0.1:${process.env.HARDHAT_LOCALHOST_PORT || "8545"}`,
       chainId: 31337,
     },
     // Add more networks as needed

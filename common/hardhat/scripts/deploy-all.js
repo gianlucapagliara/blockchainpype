@@ -52,8 +52,18 @@ async function main() {
     deployedContracts.TestMultisig = await multisig.getAddress();
     console.log(`TestMultisig deployed to: ${deployedContracts.TestMultisig}`);
 
-    // Save deployment addresses to file
-    const deploymentPath = path.join(__dirname, "..", "deployments.json");
+    // Deploy SimpleV2Router (UniswapV2Router02-compatible test router)
+    console.log("\n6. Deploying SimpleV2Router...");
+    const SimpleV2Router = await hre.ethers.getContractFactory("SimpleV2Router");
+    const router = await SimpleV2Router.deploy(deployedContracts.TestUniswapV2Factory);
+    await router.waitForDeployment();
+    deployedContracts.SimpleV2Router = await router.getAddress();
+    console.log(`SimpleV2Router deployed to: ${deployedContracts.SimpleV2Router}`);
+
+    // Save deployment addresses to file (overridable so concurrent test
+    // sessions do not race on the shared deployments.json)
+    const deploymentPath = process.env.DEPLOYMENTS_FILE
+        || path.join(__dirname, "..", "deployments.json");
     fs.writeFileSync(deploymentPath, JSON.stringify(deployedContracts, null, 2));
 
     console.log("\n=== Deployment Summary ===");
@@ -65,6 +75,16 @@ async function main() {
     await testToken.mint(deployer.address, hre.ethers.parseEther("1000"));
     await testToken2.mint(deployer.address, hre.ethers.parseEther("1000"));
     console.log("Minted 1000 tokens to deployer for both TestToken and TestToken2");
+
+    // Seed liquidity into the TestToken/TestToken2 pair so swaps can execute:
+    // mint reserves directly to the pair, then mint LP tokens to the deployer.
+    const pair = await hre.ethers.getContractAt("TestUniswapV2Pair", pairAddress);
+    await testToken.mint(pairAddress, hre.ethers.parseEther("1000"));
+    await testToken2.mint(pairAddress, hre.ethers.parseEther("1000"));
+    const mintLiquidityTx = await pair.mint(deployer.address);
+    await mintLiquidityTx.wait();
+    const [reserve0, reserve1] = await pair.getReserves();
+    console.log(`Seeded pair liquidity: reserve0=${reserve0}, reserve1=${reserve1}`);
 
     // Fund the multisig with some ETH
     await deployer.sendTransaction({

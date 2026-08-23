@@ -66,31 +66,30 @@ git clone https://github.com/gianlucapagliara/blockchainpype.git
 cd blockchainpype
 ```
 
-2. Install dependencies with Poetry:
+2. Install dependencies and set up pre-commit hooks (requires [uv](https://docs.astral.sh/uv/)):
 ```bash
-poetry install
-```
-
-3. Set up pre-commit hooks:
-```bash
-poetry run pre-commit install
+make install
 ```
 
 ### Testing
 
-Run the test suite:
+Run the test suite (network- and integration-marked tests are skipped by default):
 
 ```bash
-poetry run pytest
+make test
+```
+
+Run the Hardhat integration suite (requires Node.js and `npm install` in `common/hardhat`):
+
+```bash
+make test-integration
 ```
 
 ### Code Quality
 
 The project uses several tools to maintain code quality:
-- Black for code formatting
-- isort for import sorting
+- ruff for linting and code formatting
 - mypy for static type checking
-- ruff for linting
 - pre-commit hooks for automated checks
 
 ## License

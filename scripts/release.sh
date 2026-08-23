@@ -58,7 +58,10 @@ if [[ "$YES" != true ]]; then
     fi
 fi
 
-sed -i '' "s/^version = \"${CURRENT_VERSION}\"/version = \"${NEW_VERSION}\"/" "$PYPROJECT"
+# Portable in-place sed: GNU sed rejects `-i ''` (BSD syntax), so use a
+# backup suffix that works on both and remove the backup afterwards.
+sed -i.bak "s/^version = \"${CURRENT_VERSION}\"/version = \"${NEW_VERSION}\"/" "$PYPROJECT"
+rm -f "${PYPROJECT}.bak"
 
 uv sync --quiet
 
@@ -66,7 +69,9 @@ echo "Running checks..."
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy --strict blockchainpype/
-uv run pytest tests/ -x -q --ignore=tests/evm/test_hardhat.py --ignore=tests/evm/test_uniswap_hardhat_integration.py -m "not network"
+# Test selection (skips network/integration tests) comes from addopts in
+# pyproject.toml — the same defaults as CI and `make test`.
+uv run pytest -x -q
 
 git add "$PYPROJECT" uv.lock
 git commit -m "chore: bump version to ${NEW_VERSION}"

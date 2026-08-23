@@ -51,7 +51,7 @@ contract TestUniswapV2Pair is ERC20, Ownable {
         _blockTimestampLast = blockTimestampLast;
     }
 
-    function mint(address to) external onlyOwner returns (uint256 liquidity) {
+    function mint(address to) external returns (uint256 liquidity) {
         uint256 balance0 = IERC20(token0).balanceOf(address(this));
         uint256 balance1 = IERC20(token1).balanceOf(address(this));
         uint256 amount0 = balance0 - reserve0;
@@ -60,7 +60,9 @@ contract TestUniswapV2Pair is ERC20, Ownable {
         uint256 _totalSupply = totalSupply();
         if (_totalSupply == 0) {
             liquidity = sqrt(amount0 * amount1) - 1000;
-            _mint(address(0), 1000); // permanently lock the first 1000 tokens
+            // Permanently lock the first 1000 LP tokens. OpenZeppelin's ERC20
+            // rejects minting to address(0), so use the dead address instead.
+            _mint(address(0xdead), 1000);
         } else {
             liquidity = min(
                 (amount0 * _totalSupply) / reserve0,
@@ -77,7 +79,7 @@ contract TestUniswapV2Pair is ERC20, Ownable {
 
     function burn(
         address to
-    ) external onlyOwner returns (uint256 amount0, uint256 amount1) {
+    ) external returns (uint256 amount0, uint256 amount1) {
         uint256 balance0 = IERC20(token0).balanceOf(address(this));
         uint256 balance1 = IERC20(token1).balanceOf(address(this));
         uint256 liquidity = balanceOf(address(this));
@@ -106,7 +108,7 @@ contract TestUniswapV2Pair is ERC20, Ownable {
         uint256 amount0Out,
         uint256 amount1Out,
         address to
-    ) external onlyOwner {
+    ) external {
         require(
             amount0Out > 0 || amount1Out > 0,
             "TestUniswapV2: INSUFFICIENT_OUTPUT_AMOUNT"
