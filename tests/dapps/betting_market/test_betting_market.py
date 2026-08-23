@@ -11,15 +11,19 @@ This module tests:
 from decimal import Decimal
 
 import pytest
+from financepype.owners.wallet import BlockchainWallet
 from financepype.platforms.blockchain import BlockchainPlatform
 
 from blockchainpype.dapps.betting_market import (
+    MAX_DERIVED_OUTCOME_PRICE,
+    MIN_DERIVED_OUTCOME_PRICE,
     BettingMarketConfiguration,
     BettingMarketDApp,
     BettingMarketModel,
     BettingPosition,
     MarketStatus,
     ProtocolConfiguration,
+    ProtocolImplementation,
 )
 from tests.dapps.helpers import FIXED_TIMESTAMP, StubTransaction, make_transaction
 
@@ -33,11 +37,15 @@ class StubProtocolImplementation:
         self.protocol_name = protocol_name
         self.platform = platform
         self.token_price = Decimal("0.65")
+        self.wallet: BlockchainWallet | None = None
         self._markets: dict[str, BettingMarketModel] = {}
         self._positions: dict[str, list[BettingPosition]] = {}
         self.buy_calls: list[tuple] = []
         self.sell_calls: list[tuple] = []
         self.redeem_calls: list[tuple] = []
+
+    def set_wallet(self, wallet: BlockchainWallet | None) -> None:
+        self.wallet = wallet
 
     async def get_market(self, market_id: str) -> BettingMarketModel:
         if market_id not in self._markets:
@@ -430,6 +438,127 @@ class TestTradingOperations:
 
         assert isinstance(transaction, StubTransaction)
         assert stub_strategy.redeem_calls == [("test_market_1", USER_ADDRESS)]
+
+
+class TestDerivedPriceClamping:
+    """Derived max/min prices must stay inside the (0, 1) probability range."""
+
+    @pytest.fixture
+    def wide_slippage_market(self, test_protocol_config, dapp_platform):
+        """A 5% slippage tolerance, enough to push 0.99 above 1.0."""
+        return StubBettingMarket(
+            BettingMarketConfiguration(
+                platform=dapp_platform,
+                protocols=[test_protocol_config],
+                default_slippage_tolerance=Decimal("0.05"),
+            )
+        )
+
+    async def test_high_probability_buy_clamps_max_price(self, wide_slippage_market):
+        """Regression: 0.99 * 1.05 = 1.0395 was forwarded and rejected."""
+        strategy = wide_slippage_market._protocol_strategies["Test Protocol"]
+        strategy.token_price = Decimal("0.99")
+
+        transaction = await wide_slippage_market.buy_outcome_tokens(
+            market_id="test_market_1",
+            outcome_token_id="yes_token_1",
+            amount=Decimal("100"),
+            user_address=USER_ADDRESS,
+        )
+
+        assert isinstance(transaction, StubTransaction)
+        forwarded_max_price = strategy.buy_calls[0][3]
+        assert forwarded_max_price == MAX_DERIVED_OUTCOME_PRICE
+        assert forwarded_max_price == Decimal("0.999")
+        assert Decimal(0) < forwarded_max_price < Decimal(1)
+
+    async def test_buy_below_the_clamp_is_untouched(self, wide_slippage_market):
+        strategy = wide_slippage_market._protocol_strategies["Test Protocol"]
+        strategy.token_price = Decimal("0.50")
+
+        await wide_slippage_market.buy_outcome_tokens(
+            market_id="test_market_1",
+            outcome_token_id="yes_token_1",
+            amount=Decimal("100"),
+            user_address=USER_ADDRESS,
+        )
+
+        assert strategy.buy_calls[0][3] == Decimal("0.525")
+
+    async def test_explicit_max_price_is_not_clamped(self, wide_slippage_market):
+        """An explicit caller value is forwarded untouched, even above 1."""
+        strategy = wide_slippage_market._protocol_strategies["Test Protocol"]
+
+        await wide_slippage_market.buy_outcome_tokens(
+            market_id="test_market_1",
+            outcome_token_id="yes_token_1",
+            amount=Decimal("100"),
+            user_address=USER_ADDRESS,
+            max_price=Decimal("1.5"),
+        )
+
+        assert strategy.buy_calls[0][3] == Decimal("1.5")
+
+    async def test_low_probability_sell_clamps_min_price(self, wide_slippage_market):
+        """The mirror clamp: a near-zero price must stay strictly positive."""
+        strategy = wide_slippage_market._protocol_strategies["Test Protocol"]
+        strategy.token_price = Decimal("0")
+
+        await wide_slippage_market.sell_outcome_tokens(
+            market_id="test_market_1",
+            outcome_token_id="yes_token_1",
+            shares=Decimal("50"),
+            user_address=USER_ADDRESS,
+        )
+
+        forwarded_min_price = strategy.sell_calls[0][3]
+        assert forwarded_min_price == MIN_DERIVED_OUTCOME_PRICE
+        assert forwarded_min_price == Decimal("0.001")
+
+    async def test_sell_above_the_clamp_is_untouched(self, wide_slippage_market):
+        strategy = wide_slippage_market._protocol_strategies["Test Protocol"]
+        strategy.token_price = Decimal("0.50")
+
+        await wide_slippage_market.sell_outcome_tokens(
+            market_id="test_market_1",
+            outcome_token_id="yes_token_1",
+            shares=Decimal("50"),
+            user_address=USER_ADDRESS,
+        )
+
+        assert strategy.sell_calls[0][3] == Decimal("0.475")
+
+
+class StrategyWithoutSetWallet:
+    """Every betting-market method except the wallet binding one."""
+
+    async def get_market(self, market_id): ...
+    async def get_markets(self, *args, **kwargs): ...
+    async def get_user_positions(self, *args, **kwargs): ...
+    async def get_outcome_token_price(self, *args, **kwargs): ...
+    async def build_buy_transaction(self, *args, **kwargs): ...
+    async def build_sell_transaction(self, *args, **kwargs): ...
+    async def build_redeem_transaction(self, *args, **kwargs): ...
+    async def calculate_buy_quote(self, *args, **kwargs): ...
+    async def calculate_sell_quote(self, *args, **kwargs): ...
+
+
+class TestProtocolContract:
+    """The betting-market ProtocolImplementation is a runtime-checkable contract."""
+
+    def test_protocol_is_runtime_checkable(self, stub_strategy):
+        assert isinstance(stub_strategy, ProtocolImplementation)
+
+    def test_incomplete_implementation_does_not_conform(self):
+        assert not isinstance(StrategyWithoutSetWallet(), ProtocolImplementation)
+
+    def test_set_wallet_is_part_of_the_contract(self, stub_strategy):
+        sentinel = object()
+        stub_strategy.set_wallet(sentinel)
+        assert stub_strategy.wallet is sentinel
+
+        stub_strategy.set_wallet(None)
+        assert stub_strategy.wallet is None
 
 
 class TestProtocolManagement:

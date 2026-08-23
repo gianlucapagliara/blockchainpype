@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, cast
 from pydantic import ConfigDict, Field
 
 from blockchainpype.evm.asset import EthereumAsset, EthereumAssetData
+from blockchainpype.evm.blockchain.gas import GasConfiguration
 from blockchainpype.evm.blockchain.identifier import EthereumAddress
 from blockchainpype.evm.dapp.abi import EthereumABI, EthereumLocalFileABI
 from blockchainpype.evm.dapp.contract import (
@@ -183,13 +184,14 @@ class ERC20Contract(EthereumSmartContract):
         function_name: str,
         args: list[Any],
         client_operation_id: str | None,
+        gas_configuration: GasConfiguration | None = None,
     ) -> EthereumTransaction:
         """
         Build, sign and broadcast a state-changing contract call.
 
         The contract is lazily initialized, the wallet's nonce is synced when
         needed, and the transaction is built via wallet.build_transaction so the
-        wallet's gas configuration applies.
+        wallet's gas configuration applies unless one is passed explicitly.
 
         Args:
             wallet (EthereumWallet): The wallet signing and sending the transaction
@@ -197,6 +199,9 @@ class ERC20Contract(EthereumSmartContract):
             args (list[Any]): Already-encoded (raw) function arguments
             client_operation_id (str | None): Optional operation ID; generated
                 when not provided
+            gas_configuration (GasConfiguration | None): Gas settings to
+                estimate the fees with; the wallet's own configuration is used
+                when omitted
 
         Returns:
             EthereumTransaction: The tracked, broadcast transaction
@@ -205,7 +210,9 @@ class ERC20Contract(EthereumSmartContract):
             await self.initialize()
 
         function = self.functions[function_name](*args)
-        tx_data = await wallet.build_transaction(function=function)
+        tx_data = await wallet.build_transaction(
+            function=function, gas_configuration=gas_configuration
+        )
 
         if wallet.last_nonce is None:
             await wallet.sync_nonce()
@@ -226,6 +233,7 @@ class ERC20Contract(EthereumSmartContract):
         recipient: EthereumAddress,
         amount: Decimal,
         client_operation_id: str | None = None,
+        gas_configuration: GasConfiguration | None = None,
     ) -> EthereumTransaction:
         """
         Sign and broadcast a transaction transferring tokens to a recipient.
@@ -237,6 +245,10 @@ class ERC20Contract(EthereumSmartContract):
             recipient (EthereumAddress): The recipient's address
             amount (Decimal): The decimal-adjusted amount of tokens to transfer
             client_operation_id (str | None): Optional operation ID for tracking
+            gas_configuration (GasConfiguration | None): Optional gas settings
+                overriding the wallet's own (e.g. a
+                :class:`~blockchainpype.evm.dapp.gas.GasPriceCappedConfiguration`
+                enforcing a caller's maximum gas price)
 
         Returns:
             EthereumTransaction: The tracked transfer transaction
@@ -247,6 +259,7 @@ class ERC20Contract(EthereumSmartContract):
             "transfer",
             [recipient.raw, raw_amount],
             client_operation_id,
+            gas_configuration=gas_configuration,
         )
 
     async def place_transfer_from(
@@ -256,6 +269,7 @@ class ERC20Contract(EthereumSmartContract):
         recipient: EthereumAddress,
         amount: Decimal,
         client_operation_id: str | None = None,
+        gas_configuration: GasConfiguration | None = None,
     ) -> EthereumTransaction:
         """
         Sign and broadcast a transaction transferring tokens between addresses.
@@ -270,6 +284,10 @@ class ERC20Contract(EthereumSmartContract):
             recipient (EthereumAddress): The recipient's address
             amount (Decimal): The decimal-adjusted amount of tokens to transfer
             client_operation_id (str | None): Optional operation ID for tracking
+            gas_configuration (GasConfiguration | None): Optional gas settings
+                overriding the wallet's own (e.g. a
+                :class:`~blockchainpype.evm.dapp.gas.GasPriceCappedConfiguration`
+                enforcing a caller's maximum gas price)
 
         Returns:
             EthereumTransaction: The tracked transfer transaction
@@ -280,6 +298,7 @@ class ERC20Contract(EthereumSmartContract):
             "transferFrom",
             [sender.raw, recipient.raw, raw_amount],
             client_operation_id,
+            gas_configuration=gas_configuration,
         )
 
     async def place_approve(
@@ -288,6 +307,7 @@ class ERC20Contract(EthereumSmartContract):
         spender: EthereumAddress,
         amount: Decimal,
         client_operation_id: str | None = None,
+        gas_configuration: GasConfiguration | None = None,
     ) -> EthereumTransaction:
         """
         Sign and broadcast a transaction approving a spender to spend tokens.
@@ -298,6 +318,10 @@ class ERC20Contract(EthereumSmartContract):
             spender (EthereumAddress): The address to approve
             amount (Decimal): The decimal-adjusted amount of tokens to approve
             client_operation_id (str | None): Optional operation ID for tracking
+            gas_configuration (GasConfiguration | None): Optional gas settings
+                overriding the wallet's own (e.g. a
+                :class:`~blockchainpype.evm.dapp.gas.GasPriceCappedConfiguration`
+                enforcing a caller's maximum gas price)
 
         Returns:
             EthereumTransaction: The tracked approval transaction
@@ -308,6 +332,7 @@ class ERC20Contract(EthereumSmartContract):
             "approve",
             [spender.raw, raw_amount],
             client_operation_id,
+            gas_configuration=gas_configuration,
         )
 
 

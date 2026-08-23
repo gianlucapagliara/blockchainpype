@@ -12,6 +12,7 @@ from decimal import Decimal
 
 import pytest
 from financepype.assets.blockchain import BlockchainAsset
+from financepype.owners.wallet import BlockchainWallet
 from financepype.platforms.blockchain import BlockchainPlatform
 
 from blockchainpype.dapps.money_market import (
@@ -23,6 +24,7 @@ from blockchainpype.dapps.money_market import (
     MoneyMarket,
     MoneyMarketConfiguration,
     ProtocolConfiguration,
+    ProtocolImplementation,
     UserAccountData,
 )
 from tests.dapps.helpers import FIXED_TIMESTAMP, StubTransaction, make_transaction
@@ -42,7 +44,12 @@ class StubProtocolImplementation:
         self.platform = platform
         self.position_asset = position_asset
         self.supply_apy = supply_apy
+        self.wallet: BlockchainWallet | None = None
         self.calls: list[tuple] = []
+
+    def set_wallet(self, wallet: BlockchainWallet | None) -> None:
+        self.calls.append(("set_wallet", wallet))
+        self.wallet = wallet
 
     async def get_market_data(self, asset: BlockchainAsset) -> MarketData:
         self.calls.append(("get_market_data", asset))
@@ -127,9 +134,21 @@ class StubProtocolImplementation:
         return make_transaction(self.platform)
 
     async def build_withdraw_transaction(
-        self, asset: BlockchainAsset, amount: Decimal, user_address: str
+        self,
+        asset: BlockchainAsset,
+        amount: Decimal,
+        user_address: str,
+        withdraw_all: bool = False,
     ) -> StubTransaction:
-        self.calls.append(("build_withdraw_transaction", asset, amount, user_address))
+        self.calls.append(
+            (
+                "build_withdraw_transaction",
+                asset,
+                amount,
+                user_address,
+                withdraw_all,
+            )
+        )
         return make_transaction(self.platform)
 
     async def build_borrow_transaction(
@@ -389,7 +408,35 @@ class TestMoneyMarketOperations:
             usdc_asset,
             Decimal("500"),
             USER_ADDRESS,
+            False,
         )
+
+    async def test_withdraw_all(self, money_market, stub_strategy, usdc_asset):
+        """withdraw_all must reach the strategy, mirroring repay_all."""
+        transaction = await money_market.withdraw(
+            usdc_asset, Decimal("0"), USER_ADDRESS, withdraw_all=True
+        )
+
+        assert isinstance(transaction, StubTransaction)
+        assert stub_strategy.calls[-1] == (
+            "build_withdraw_transaction",
+            usdc_asset,
+            Decimal("0"),
+            USER_ADDRESS,
+            True,
+        )
+
+    async def test_withdraw_with_specific_protocol(self, money_market, usdc_asset):
+        """withdraw_all must also be forwarded on the named-protocol path."""
+        transaction = await money_market.withdraw(
+            usdc_asset,
+            Decimal("0"),
+            USER_ADDRESS,
+            withdraw_all=True,
+            protocol="Test Protocol",
+        )
+
+        assert isinstance(transaction, StubTransaction)
 
     async def test_borrow_with_defaults(self, money_market, stub_strategy, weth_asset):
         """Borrow must forward the configured default interest rate mode."""
@@ -495,6 +542,39 @@ class TestMoneyMarketOperations:
         )
 
         assert stub_strategy.calls[-1][5] is False
+
+
+class StrategyWithoutSetWallet:
+    """Every money-market method except the wallet binding one."""
+
+    async def get_market_data(self, asset): ...
+    async def get_user_account_data(self, user_address): ...
+    async def get_lending_positions(self, user_address): ...
+    async def get_borrowing_positions(self, user_address): ...
+    async def build_supply_transaction(self, *args, **kwargs): ...
+    async def build_withdraw_transaction(self, *args, **kwargs): ...
+    async def build_borrow_transaction(self, *args, **kwargs): ...
+    async def build_repay_transaction(self, *args, **kwargs): ...
+    async def build_collateral_transaction(self, *args, **kwargs): ...
+    async def build_liquidation_transaction(self, *args, **kwargs): ...
+
+
+class TestProtocolContract:
+    """The money-market ProtocolImplementation is a runtime-checkable contract."""
+
+    def test_protocol_is_runtime_checkable(self, stub_strategy):
+        assert isinstance(stub_strategy, ProtocolImplementation)
+
+    def test_incomplete_implementation_does_not_conform(self):
+        assert not isinstance(StrategyWithoutSetWallet(), ProtocolImplementation)
+
+    def test_set_wallet_is_part_of_the_contract(self, stub_strategy):
+        sentinel = object()
+        stub_strategy.set_wallet(sentinel)
+        assert stub_strategy.wallet is sentinel
+
+        stub_strategy.set_wallet(None)
+        assert stub_strategy.wallet is None
 
 
 class TestMoneyMarketErrorHandling:

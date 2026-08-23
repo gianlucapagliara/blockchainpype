@@ -3,8 +3,12 @@ This package provides interfaces for interacting with betting market protocols.
 It includes abstractions for prediction markets like Polymarket.
 """
 
+from .betting_market import (
+    MAX_DERIVED_OUTCOME_PRICE,
+    MIN_DERIVED_OUTCOME_PRICE,
+    ProtocolImplementation,
+)
 from .betting_market import BettingMarket as BettingMarketDApp
-from .betting_market import ProtocolImplementation
 from .models import BettingMarket as BettingMarketModel
 from .models import (
     BettingMarketAction,
@@ -17,6 +21,8 @@ from .models import (
 )
 
 __all__ = [
+    "MAX_DERIVED_OUTCOME_PRICE",
+    "MIN_DERIVED_OUTCOME_PRICE",
     "BettingMarketDApp",
     "BettingMarketModel",
     "ProtocolImplementation",

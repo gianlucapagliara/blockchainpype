@@ -1,198 +1,237 @@
-#!/usr/bin/env python3
-"""
-Hardhat Testing Framework Demo
+"""Drive the local Hardhat environment used by the integration test-suite.
 
-This script demonstrates the complete workflow for testing blockchain developments
-using the Hardhat local chain integration.
+:class:`tests.evm.hardhat.HardhatTestEnvironment` starts a Hardhat node on a
+free port, runs ``scripts/deploy-all.js`` (TestToken, TestToken2, a
+TestUniswapV2Factory/Pair with seeded liquidity, a TestMultisig and the
+UniswapV2Router02-compatible SimpleV2Router), and registers the resulting
+``hardhat`` platform in the :class:`BlockchainFactory`. Everything the library
+does against mainnet works against that node — this script proves it by running
+an ETH transfer and a real token swap through
+:class:`~blockchainpype.evm.dapp.uniswap.UniswapDEX`.
 
-Usage:
-    python examples/hardhat_testing_demo.py
+Prerequisites:
+
+* Node.js and npm on the PATH.
+* The Hardhat dependencies installed once::
+
+      cd common/hardhat && npm install
+
+The same environment powers ``tests/evm/test_hardhat.py``::
+
+    uv run pytest tests/evm/test_hardhat.py -m "" --timeout=300
+
+Importing this module is side-effect free: the node is only started by
+``main()``, and always torn down again.
+
+Run it with::
+
+    uv run python -m examples.hardhat_testing_demo
 """
+
+from __future__ import annotations
 
 import asyncio
-import sys
+from decimal import Decimal
 from pathlib import Path
 
-# Add the project root to the path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+from pydantic import SecretStr
+from web3 import Web3
 
+from blockchainpype.dapps.router.models import SwapMode, SwapRoute
+from blockchainpype.evm.blockchain.blockchain import EthereumBlockchain
 from blockchainpype.evm.blockchain.identifier import EthereumAddress
-from tests.evm.hardhat import HardhatTestEnvironment, get_hardhat_accounts
+from blockchainpype.evm.dapp.erc20 import (
+    ERC20Contract,
+    ERC20ContractConfiguration,
+    ERC20Token,
+)
+from blockchainpype.evm.dapp.uniswap import UniswapConfiguration, UniswapDEX
+from blockchainpype.evm.dapp.unsigned import unsigned_tx_params
+from blockchainpype.evm.transaction import EthereumTransaction
+from blockchainpype.evm.wallet.identifier import EthereumWalletIdentifier
+from blockchainpype.evm.wallet.signer import EthereumSignerConfiguration
+from blockchainpype.evm.wallet.wallet import (
+    EthereumWallet,
+    EthereumWalletConfiguration,
+)
+from tests.evm.hardhat import HardhatTestEnvironment, get_hardhat_private_keys
+
+#: The Hardhat project shipped with the repository.
+HARDHAT_DIR = Path(__file__).resolve().parent.parent / "common" / "hardhat"
+
+TRANSFER_ETH = 5.0
+SWAP_AMOUNT = Decimal("1")
+MAX_SLIPPAGE = Decimal("0.005")  # 0.5%
+DEADLINE_MINUTES = 10
+RECEIPT_TIMEOUT_SECONDS = 60
 
 
-async def main():
-    """Main demo function."""
-    print("🚀 Hardhat Testing Framework Demo")
-    print("=" * 50)
+def build_wallet(blockchain: EthereumBlockchain, account_index: int) -> EthereumWallet:
+    """Build a signing wallet for one of Hardhat's deterministic accounts."""
+    private_key = get_hardhat_private_keys()[account_index]
+    account = Web3().eth.account.from_key(private_key)
+    configuration = EthereumWalletConfiguration(
+        identifier=EthereumWalletIdentifier(
+            name=f"hardhat-{account_index}",
+            platform=blockchain.platform,
+            address=EthereumAddress.from_string(account.address),
+        ),
+        signer=EthereumSignerConfiguration(private_key=SecretStr(private_key)),
+    )
+    return EthereumWallet(configuration=configuration, blockchain=blockchain)
 
-    # Get the hardhat directory
-    hardhat_dir = Path(__file__).parent.parent / "common" / "hardhat"
 
-    # Create test environment
-    print("\n1. Setting up test environment...")
-    env = HardhatTestEnvironment(str(hardhat_dir))
+def build_token(blockchain: EthereumBlockchain, address: str) -> ERC20Token:
+    """Build an ERC-20 handle for a token deployed on the local node."""
+    token_address = EthereumAddress.from_string(address)
+    return ERC20Token(
+        platform=blockchain.platform,
+        identifier=token_address,
+        contract=ERC20Contract(
+            ERC20ContractConfiguration(
+                platform=blockchain.platform,
+                address=token_address,
+            )
+        ),
+    )
 
+
+async def wait_for_receipt(
+    blockchain: EthereumBlockchain, transaction: EthereumTransaction
+) -> dict[str, object]:
+    """Wait for a broadcast transaction to be mined and assert it succeeded.
+
+    ``sign_and_send_transaction`` broadcasts in the background, so the receipt
+    poll below is what actually waits for the node.
+
+    Raises:
+        RuntimeError: If the transaction is unsigned or reverted.
+    """
+    signed = transaction.signed_transaction
+    if signed is None:
+        raise RuntimeError(f"{transaction.client_operation_id} was not signed")
+
+    receipt = await blockchain.web3.eth.wait_for_transaction_receipt(
+        signed.hash, timeout=RECEIPT_TIMEOUT_SECONDS
+    )
+    if receipt["status"] != 1:
+        raise RuntimeError(f"{transaction.client_operation_id} reverted")
+    return dict(receipt)
+
+
+async def show_environment(env: HardhatTestEnvironment) -> EthereumBlockchain:
+    """Print what the environment brought up."""
+    blockchain = env.blockchain
+    if blockchain is None:
+        raise RuntimeError("Environment setup did not register a blockchain")
+
+    print("=== Environment ===")
+    print(f"platform:     {blockchain.platform.identifier}")
+    print(f"chain id:     {blockchain.platform.chain_id}")
+    print(f"rpc port:     {env.node.port}")
+    print(f"block number: {await blockchain.fetch_block_number()}")
+    print(f"accounts:     {len(env.test_accounts)}")
+
+    print()
+    print("=== Deployed contracts ===")
+    for name, address in env.node.deployments.items():
+        print(f"- {name}: {address}")
+    return blockchain
+
+
+async def transfer_eth(env: HardhatTestEnvironment) -> None:
+    """Move ETH between two unlocked node accounts and check the balances."""
+    sender, receiver = env.test_accounts[0], env.test_accounts[1]
+
+    before = await env.get_account_balance_wei(receiver)
+    tx_hash = await env.send_eth(sender, receiver, TRANSFER_ETH)
+    after = await env.get_account_balance_wei(receiver)
+
+    print()
+    print("=== ETH transfer ===")
+    print(f"tx hash:  {tx_hash}")
+    print(f"received: {Web3.from_wei(after - before, 'ether')} ETH")
+
+
+async def swap_tokens(
+    blockchain: EthereumBlockchain, deployments: dict[str, str]
+) -> None:
+    """Quote, approve and execute a TestToken -> TestToken2 swap."""
+    wallet = build_wallet(blockchain, account_index=0)
+    await wallet.sync_nonce()
+
+    token_in = build_token(blockchain, deployments["TestToken"])
+    token_out = build_token(blockchain, deployments["TestToken2"])
+    await token_in.initialize_data()
+    await token_out.initialize_data()
+
+    router_address = deployments["SimpleV2Router"]
+    uniswap = UniswapDEX(
+        blockchain,
+        UniswapConfiguration.local_network(
+            platform=blockchain.platform,
+            v2_factory_address=deployments["TestUniswapV2Factory"],
+            v2_router_address=router_address,
+            default_slippage=MAX_SLIPPAGE,
+            default_deadline_minutes=DEADLINE_MINUTES,
+        ),
+        wallet=wallet,
+    )
+
+    print()
+    print("=== Swap ===")
+    print(f"wallet: {wallet.address.string}")
+
+    route: SwapRoute = await uniswap.quote_swap(
+        input_asset=token_in,
+        output_asset=token_out,
+        amount=SWAP_AMOUNT,
+        mode=SwapMode.EXACT_INPUT,
+    )
+    print(f"quote:  {route.input_amount} -> {route.output_amount} via {route.protocol}")
+
+    # The router pulls the input token with transferFrom, so it needs an
+    # allowance first. place_approve signs and broadcasts straight away.
+    approval = await token_in.contract.place_approve(
+        wallet,
+        spender=EthereumAddress.from_string(router_address),
+        amount=SWAP_AMOUNT,
+    )
+    await wait_for_receipt(blockchain, approval)
+    print(f"approved router for {SWAP_AMOUNT} tokens")
+
+    balance_before = await token_out.contract.get_balance_of(wallet.address)
+
+    # execute_swap only builds the transaction; sending it stays explicit.
+    unsigned = await uniswap.execute_swap(route, deadline_minutes=DEADLINE_MINUTES)
+    sent = wallet.sign_and_send_transaction(
+        client_operation_id=unsigned.client_operation_id,
+        tx_data=dict(unsigned_tx_params(unsigned)),
+    )
+    receipt = await wait_for_receipt(blockchain, sent)
+
+    balance_after = await token_out.contract.get_balance_of(wallet.address)
+    print(f"gas used: {receipt['gasUsed']}")
+    print(f"received: {balance_after - balance_before} {token_out.data.symbol}")
+    print(f"expected: {route.output_amount} (quoted)")
+
+
+async def main() -> None:
+    """Start the environment, exercise it, and always tear it down."""
+    print(f"Starting Hardhat from {HARDHAT_DIR}")
+    print("(run 'npm install' in common/hardhat first if this fails)")
+    env = HardhatTestEnvironment(str(HARDHAT_DIR))
+
+    await env.setup()
     try:
-        # Setup the environment (starts node, deploys contracts, etc.)
-        await env.setup()
-
-        # Initialize blockchain connection
-        print("\n2. Connecting to blockchain...")
-        blockchain = env.blockchain
-        if blockchain is None:
-            raise RuntimeError("Blockchain connection failed")
-
-        # Get test accounts
-        test_accounts = env.test_accounts
-        print(f"   ✅ Connected with {len(test_accounts)} test accounts")
-
-        # Check initial blockchain state
-        print("\n3. Checking blockchain state...")
-        block_number = await blockchain.fetch_block_number()
-        print(f"   📦 Current block: {block_number}")
-
-        # Check account balances
-        print("\n4. Checking account balances...")
-        for i, account in enumerate(test_accounts[:3]):  # Show first 3 accounts
-            balance = await env.get_account_balance(account)
-            print(f"   💰 Account {i + 1}: {balance:.2f} ETH")
-
-        # Test deployed contracts
-        print("\n5. Checking deployed contracts...")
-        deployed_contracts = env.node.deployments
-        for name, address in deployed_contracts.items():
-            print(f"   📜 {name}: {address}")
-
-        # Test token contracts
-        print("\n6. Testing token contracts...")
-        token_address = deployed_contracts["TestToken"]
-        print(f"   🪙 TestToken deployed at: {token_address}")
-        print("   ✅ Token contract is available for interaction")
-
-        # Test ETH transfer
-        print("\n7. Testing ETH transfer...")
-        sender = test_accounts[0]
-        receiver = test_accounts[1]
-
-        initial_balance = await env.get_account_balance(receiver)
-        print(f"   📤 Initial receiver balance: {initial_balance:.2f} ETH")
-
-        # Send 5 ETH
-        print("   🔄 Sending 5 ETH...")
-        tx_hash = await env.send_eth(sender, receiver, 5.0)
-        print(f"   ✅ Transaction hash: {tx_hash}")
-
-        final_balance = await env.get_account_balance(receiver)
-        print(f"   📥 Final receiver balance: {final_balance:.2f} ETH")
-        print(f"   💸 Difference: {final_balance - initial_balance:.2f} ETH")
-
-        # Test mining blocks
-        print("\n8. Testing block mining...")
-        initial_block = await blockchain.fetch_block_number()
-        print(f"   📦 Initial block: {initial_block}")
-
-        print("   ⛏️  Mining 3 blocks...")
-        await env.mine_blocks(3)
-
-        final_block = await blockchain.fetch_block_number()
-        print(f"   📦 Final block: {final_block}")
-        print(f"   🏗️  Blocks mined: {final_block - initial_block}")
-
-        # Test snapshots
-        print("\n9. Testing blockchain snapshots...")
-        snapshot_id = await env.snapshot()
-        print(f"   📸 Snapshot taken: {snapshot_id}")
-
-        # Make a change
-        await env.send_eth(sender, receiver, 1.0)
-        balance_after_change = await env.get_account_balance(receiver)
-        print(f"   📥 Balance after change: {balance_after_change:.2f} ETH")
-
-        # Revert to snapshot
-        await env.revert_to_snapshot(snapshot_id)
-        balance_after_revert = await env.get_account_balance(receiver)
-        print(f"   📥 Balance after revert: {balance_after_revert:.2f} ETH")
-        print(f"   ↩️  Reverted successfully: {balance_after_revert == final_balance}")
-
-        # Test multisig contract
-        print("\n10. Testing multisig contract...")
-        multisig_address = deployed_contracts["TestMultisig"]
-        multisig_balance = await blockchain.fetch_native_asset_balance(
-            EthereumAddress.from_string(multisig_address)
-        )
-        print(f"   🏦 Multisig balance: {multisig_balance:.2f} ETH")
-
-        # Test DEX pair
-        print("\n11. Testing DEX components...")
-        factory_address = deployed_contracts["TestUniswapV2Factory"]
-        pair_address = deployed_contracts["TestUniswapV2Pair"]
-
-        print(f"   🏭 Factory: {factory_address}")
-        print(f"   🔗 Pair: {pair_address}")
-
-        # Summary
-        print("\n12. Test Summary...")
-        print("   ✅ Hardhat node started successfully")
-        print("   ✅ Contracts deployed successfully")
-        print("   ✅ Blockchain connection established")
-        print("   ✅ ETH transfers working")
-        print("   ✅ Token contracts deployed")
-        print("   ✅ Block mining working")
-        print("   ✅ Snapshots working")
-        print("   ✅ All test contracts deployed")
-
-        print("\n🎉 All tests completed successfully!")
-        print("\n💡 Next steps:")
-        print("   - Run: pytest tests/test_hardhat_example.py -v")
-        print("   - Create your own test files using the framework")
-        print("   - Check docs/HARDHAT_TESTING_GUIDE.md for detailed usage")
-
-    except Exception as e:
-        print(f"\n❌ Error during demo: {e}")
-        import traceback
-
-        traceback.print_exc()
-
+        blockchain = await show_environment(env)
+        await transfer_eth(env)
+        await swap_tokens(blockchain, env.node.deployments)
     finally:
-        # Cleanup
-        print("\n🧹 Cleaning up...")
+        print()
+        print("Tearing down the environment...")
         await env.teardown()
-        print("   ✅ Environment cleaned up")
-
-    print("\n" + "=" * 50)
-    print("Demo completed!")
-
-
-def demo_utility_functions():
-    """Demonstrate utility functions."""
-    print("\n🔧 Utility Functions Demo")
-    print("-" * 30)
-
-    # Get hardhat accounts
-    accounts = get_hardhat_accounts()
-    print(f"Default Hardhat accounts: {len(accounts)}")
-    for i, account in enumerate(accounts[:3]):
-        print(f"  Account {i + 1}: {account}")
-
-    # Show deterministic nature
-    print(f"\nFirst account (always the same): {accounts[0]}")
-    print("These accounts are deterministic and will always be the same")
 
 
 if __name__ == "__main__":
-    print("Hardhat Testing Framework Demo")
-    print("This demo showcases the complete testing workflow")
-    print("Make sure Node.js and npm are installed for Hardhat")
-    print()
-
-    # Show utility functions first
-    demo_utility_functions()
-
-    # Run the main demo
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\n\n⚠️  Demo interrupted by user")
-    except Exception as e:
-        print(f"\n❌ Demo failed: {e}")
-        sys.exit(1)
+    asyncio.run(main())

@@ -43,6 +43,7 @@ from blockchainpype.evm.dapp.uniswap.dex import (
 )
 from blockchainpype.evm.dapp.uniswap.v2 import ZERO_ADDRESS, UniswapV2
 from blockchainpype.evm.dapp.uniswap.v3 import UniswapV3
+from blockchainpype.evm.dapp.unsigned import UNSIGNED_TX_DATA_KEY, unsigned_tx_params
 from blockchainpype.evm.transaction import EthereumTransaction
 from blockchainpype.evm.wallet.wallet import EthereumWallet
 from tests.evm.test_wallet import (
@@ -787,6 +788,32 @@ class TestContractConformance:
     ) -> None:
         assert isinstance(v2, ProtocolImplementation)
         assert isinstance(v3, ProtocolImplementation)
+
+    async def test_both_versions_use_the_shared_unsigned_carrier(
+        self,
+        v2: UniswapV2,
+        v3: UniswapV3,
+        ethereum_wallet: EthereumWallet,
+        usdc: StaticEthereumAsset,
+        weth: StaticEthereumAsset,
+    ) -> None:
+        """The built parameters travel under the shared ``tx_data`` key."""
+        v2.set_wallet(ethereum_wallet)
+        v3.set_wallet(ethereum_wallet)
+
+        v2_route = await v2.quote_swap(usdc, weth, Decimal("1000"))
+        v3_route = await v3.quote_swap(usdc, weth, Decimal("1000"))
+        transactions = [
+            await v2.build_swap_transaction(v2_route),
+            await v3.build_swap_transaction(v3_route),
+        ]
+
+        assert UNSIGNED_TX_DATA_KEY == "tx_data"
+        for transaction in transactions:
+            assert set(transaction.other_data) == {UNSIGNED_TX_DATA_KEY}
+            params = unsigned_tx_params(transaction)
+            assert params["from"] == ethereum_wallet.address.raw
+            assert params["chainId"] == 1
 
     async def test_build_without_wallet_raises(
         self,

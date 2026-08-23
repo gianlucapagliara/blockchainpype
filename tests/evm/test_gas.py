@@ -6,11 +6,11 @@ no network access is required.
 """
 
 from collections.abc import Generator
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
-from web3.types import Wei
+from web3.types import TxParams, Wei
 
 from blockchainpype.evm.blockchain.gas import (
     EIP1559_PERCENTILES_BY_MODE,
@@ -115,7 +115,7 @@ class TestEstimateEip1559GasFees:
 
         # avg reward of [1, 2, 3, 4] gwei = 2.5 gwei; next base fee = 2 * 10 gwei
         assert result == {
-            "gas": 1_040_000,  # ceil(default_gas 800000 * 1.3)
+            "gas": 800_000,  # ceil(default_gas 800000 * 1.3) clamped to max_gas
             "maxPriorityFeePerGas": 2_500_000_000,
             "maxFeePerGas": 22_500_000_000,
         }
@@ -171,7 +171,7 @@ class TestEstimateEip1559GasFees:
         result = await configuration.estimate_eip1559_gas_fees(w3)
 
         assert result == {
-            "gas": 1_040_000,
+            "gas": 800_000,
             "maxPriorityFeePerGas": 2_500_000_000,
             "maxFeePerGas": 22_500_000_000,
         }
@@ -231,7 +231,7 @@ class TestEstimateLegacyGasFees:
         result = await configuration.estimate_legacy_gas_fees(w3)
 
         assert result == {
-            "gas": 1_040_000,  # ceil(800000 * 1.3)
+            "gas": 800_000,  # ceil(800000 * 1.3) clamped to max_gas
             "gasPrice": 25_000_000_000,  # ceil(20 gwei * 1.25)
         }
 
@@ -295,7 +295,7 @@ class TestGetGas:
         result = await configuration.get_gas(w3)
 
         assert result == {
-            "gas": 1_040_000,
+            "gas": 800_000,
             "maxPriorityFeePerGas": 2_500_000_000,
             "maxFeePerGas": 22_500_000_000,
         }
@@ -307,7 +307,7 @@ class TestGetGas:
 
         result = await configuration.get_gas(w3, gas_strategy=GasStrategy.LEGACY)
 
-        assert result == {"gas": 1_040_000, "gasPrice": 25_000_000_000}
+        assert result == {"gas": 800_000, "gasPrice": 25_000_000_000}
         assert "maxFeePerGas" not in result
 
 
@@ -327,3 +327,46 @@ class TestMaxGasPayable:
     def test_gas_price_takes_precedence_over_max_fee(self) -> None:
         fees = {"gas": 10, "gasPrice": 7, "maxFeePerGas": 9}
         assert GasConfiguration.max_gas_payable(fees) == 70
+
+
+class TestMaxGasClamp:
+    """The configured max_gas is a hard ceiling on the buffered gas limit."""
+
+    async def test_eip1559_gas_clamped_to_max_gas(self) -> None:
+        configuration = GasConfiguration(max_gas=100_000)
+        w3 = build_web3_mock(base_fee=7 * GWEI, estimated_gas=200_000)
+
+        result = await configuration.estimate_eip1559_gas_fees(
+            w3,
+            transaction_params=cast(
+                TxParams, {"to": "0x5DF9B87991262F6BA471F09758CDE1c0FC1De734"}
+            ),
+        )
+
+        assert result["gas"] == 100_000  # ceil(200000 * 1.3) clamped
+
+    async def test_eip1559_gas_below_max_gas_unclamped(self) -> None:
+        configuration = GasConfiguration(max_gas=100_000)
+        w3 = build_web3_mock(base_fee=7 * GWEI, estimated_gas=21_000)
+
+        result = await configuration.estimate_eip1559_gas_fees(
+            w3,
+            transaction_params=cast(
+                TxParams, {"to": "0x5DF9B87991262F6BA471F09758CDE1c0FC1De734"}
+            ),
+        )
+
+        assert result["gas"] == 27_300  # ceil(21000 * 1.3), under the ceiling
+
+    async def test_legacy_gas_clamped_to_max_gas(self) -> None:
+        configuration = GasConfiguration(max_gas=100_000)
+        w3 = build_web3_mock(gas_price=20 * GWEI, estimated_gas=200_000)
+
+        result = await configuration.estimate_legacy_gas_fees(
+            w3,
+            transaction_params=cast(
+                TxParams, {"to": "0x5DF9B87991262F6BA471F09758CDE1c0FC1De734"}
+            ),
+        )
+
+        assert result["gas"] == 100_000

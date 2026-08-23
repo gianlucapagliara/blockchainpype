@@ -38,9 +38,12 @@ from hexbytes import HexBytes
 from yarl import URL
 
 from blockchainpype.dapps.betting_market import (
+    MAX_DERIVED_OUTCOME_PRICE,
+    MIN_DERIVED_OUTCOME_PRICE,
     BettingMarketModel,
     BettingPosition,
     MarketStatus,
+    ProtocolImplementation,
 )
 from blockchainpype.evm.blockchain.blockchain import (
     EthereumBlockchain,
@@ -70,10 +73,13 @@ from blockchainpype.evm.dapp.betting_market import (
 from blockchainpype.evm.dapp.betting_market.polymarket import (
     CONDITIONAL_TOKENS_ADDRESS,
     CTF_EXCHANGE_ADDRESS,
+    NEG_RISK_CTF_EXCHANGE_ADDRESS,
     USDC_ADDRESS,
     EVMBettingMarketConfiguration,
 )
 from blockchainpype.evm.dapp.erc20 import ERC20Token
+from blockchainpype.evm.dapp.gas import GasPriceCappedConfiguration
+from blockchainpype.evm.dapp.unsigned import UNSIGNED_TX_DATA_KEY, unsigned_tx_params
 from blockchainpype.evm.transaction import EthereumTransaction
 from tests.evm.test_erc20 import make_block_payload
 from tests.evm.test_wallet import (
@@ -90,6 +96,9 @@ TEST_ADDRESS = "0x8fd379246834eac74B8419FfdA202CF8051F7A03"
 OTHER_ADDRESS = "0x5B38Da6a701c568545dCfcB03FcB875f56beddC4"
 
 CONDITION_ID = "0x" + "12" * 32
+#: A market flagged ``neg_risk``: its orders settle on the NegRisk CTF
+#: Exchange and must be signed against that verifying contract.
+NEG_RISK_CONDITION_ID = "0x" + "ab" * 32
 TOKEN_ID_YES = (
     "71321045679252212594626385532706912750332728571942532289631379312455583992563"
 )
@@ -117,6 +126,20 @@ PINNED_DIGEST = "0xc6f7f69182d882111b6ce452483488787ea631168147800d6479ca9133ee7
 PINNED_SIGNATURE = (
     "0x7e32d6056d661f060a73d740f88c35b034901ad5c423a1ce7e35a55cab05dbe2"
     "2880e54fecc44ebdd6cad7deb4f263bfeb4fd28e24b19de50d2f798bdc2e017e1c"
+)
+
+# === Pinned EIP-712 regression vectors for the NEG-RISK domain ===
+#
+# Same Order struct, signed against the NegRisk CTF Exchange as
+# verifyingContract: only the domain separator (and therefore the digest and
+# the signature) change, which is exactly the regression these pin.
+NEG_RISK_DOMAIN_SEPARATOR = (
+    "0x82cb6aa85babb812f4b521a12b10f0cbc68d2b44be7bc02c047004f544adb49f"
+)
+NEG_RISK_DIGEST = "0x137d1ee7bab413a670e40fcdd32c3ddff51686ad56c16228d622c99ac9e852f2"
+NEG_RISK_SIGNATURE = (
+    "0x9a866d28e9089b37e0081d42534b39d77412ec0eb109d9fb47b11aa83a9a814a"
+    "5a1a7610563c231239545ce2cb922945398f1f813944edd4282b18adb30ddee71b"
 )
 
 # === Pinned L2 HMAC auth vectors ===
@@ -272,6 +295,15 @@ CLOB_MARKET_PAYLOAD: dict[str, Any] = {
     ],
 }
 
+#: Same shape as CLOB_MARKET_PAYLOAD but for a neg-risk market.
+NEG_RISK_CLOB_MARKET_PAYLOAD: dict[str, Any] = {
+    **CLOB_MARKET_PAYLOAD,
+    "condition_id": NEG_RISK_CONDITION_ID,
+    "question": "Which party wins the 2028 presidential election?",
+    "market_slug": "which-party-2028",
+    "neg_risk": True,
+}
+
 GAMMA_MARKET_PAYLOAD: dict[str, Any] = {
     "id": "253591",
     "question": "Will Bitcoin reach $150k by end of 2025?",
@@ -417,11 +449,27 @@ def polymarket_config() -> PolymarketConfiguration:
 
 
 @pytest.fixture
+def clob_market_session() -> FakeHttpSession:
+    """CLOB session answering the market lookups neg-risk resolution needs."""
+    return FakeHttpSession(
+        {
+            ("GET", f"/markets/{CONDITION_ID}"): CLOB_MARKET_PAYLOAD,
+            ("GET", f"/markets/{NEG_RISK_CONDITION_ID}"): NEG_RISK_CLOB_MARKET_PAYLOAD,
+        }
+    )
+
+
+@pytest.fixture
 def polymarket(
     polymarket_config: PolymarketConfiguration,
     polygon_blockchain: EthereumBlockchain,
+    clob_market_session: FakeHttpSession,
 ) -> Polymarket:
-    return Polymarket(polymarket_config, polygon_blockchain)
+    return Polymarket(
+        polymarket_config,
+        polygon_blockchain,
+        clob_client=ClobClient(session=as_session(clob_market_session)),
+    )
 
 
 # === Order amount math ===
@@ -1210,6 +1258,268 @@ class TestOrderBuilding:
                 OTHER_ADDRESS,
             )
 
+    async def test_facade_clamped_price_is_accepted_by_the_order_math(
+        self, polymarket: Polymarket, ethereum_wallet: Any
+    ) -> None:
+        """The facade's derived-price clamp is exactly what the CLOB accepts.
+
+        Regression: 0.99 * (1 + 5% slippage) = 1.0395 is rejected here, which
+        is why BettingMarket clamps derived prices at 0.999.
+        """
+        polymarket.set_wallet(ethereum_wallet)
+
+        with pytest.raises(ValueError, match="strictly between 0 and 1"):
+            await polymarket.build_buy_transaction(
+                CONDITION_ID,
+                TOKEN_ID_YES,
+                amount=Decimal("100"),
+                max_price=Decimal("0.99") * (1 + Decimal("0.05")),
+                user_address=TEST_ADDRESS,
+            )
+
+        transaction = await polymarket.build_buy_transaction(
+            CONDITION_ID,
+            TOKEN_ID_YES,
+            amount=Decimal("100"),
+            max_price=MAX_DERIVED_OUTCOME_PRICE,
+            user_address=TEST_ADDRESS,
+        )
+        payload = transaction.other_data["clob_order"]
+        # 100 USDC / 0.999 = 100.1001... shares, floored to the 0.01 step
+        assert payload["takerAmount"] == "100100000"
+        assert payload["makerAmount"] == "99999900"  # 0.999 * 100.10 USDC
+
+    async def test_clamped_sell_price_is_accepted_by_the_order_math(
+        self, polymarket: Polymarket, ethereum_wallet: Any
+    ) -> None:
+        """The mirror clamp: 0.001 is the smallest price the CLOB accepts."""
+        polymarket.set_wallet(ethereum_wallet)
+
+        with pytest.raises(ValueError, match="strictly between 0 and 1"):
+            await polymarket.build_sell_transaction(
+                CONDITION_ID,
+                TOKEN_ID_YES,
+                shares=Decimal("100"),
+                min_price=Decimal("0"),
+                user_address=TEST_ADDRESS,
+            )
+
+        transaction = await polymarket.build_sell_transaction(
+            CONDITION_ID,
+            TOKEN_ID_YES,
+            shares=Decimal("100"),
+            min_price=MIN_DERIVED_OUTCOME_PRICE,
+            user_address=TEST_ADDRESS,
+        )
+        payload = transaction.other_data["clob_order"]
+        assert payload["makerAmount"] == "100000000"  # 100 shares
+        assert payload["takerAmount"] == "100000"  # 0.001 * 100 USDC
+
+    async def test_neg_risk_flag_parsed_from_clob_market(
+        self, polymarket: Polymarket
+    ) -> None:
+        regular = polymarket._parse_clob_market(CLOB_MARKET_PAYLOAD)
+        neg_risk = polymarket._parse_clob_market(NEG_RISK_CLOB_MARKET_PAYLOAD)
+
+        assert regular.metadata["neg_risk"] is False
+        assert neg_risk.metadata["neg_risk"] is True
+
+    def test_neg_risk_flag_parsed_from_gamma_market(
+        self, polymarket: Polymarket
+    ) -> None:
+        payload = dict(GAMMA_MARKET_PAYLOAD)
+        payload["negRisk"] = True
+        assert polymarket._parse_gamma_market(payload).metadata["neg_risk"] is True
+        assert (
+            polymarket._parse_gamma_market(GAMMA_MARKET_PAYLOAD).metadata["neg_risk"]
+            is False
+        )
+
+    def test_verifying_contract_selection(self, polymarket: Polymarket) -> None:
+        assert polymarket.verifying_contract(False) == CTF_EXCHANGE_ADDRESS
+        assert polymarket.verifying_contract(True) == NEG_RISK_CTF_EXCHANGE_ADDRESS
+        assert (
+            NEG_RISK_CTF_EXCHANGE_ADDRESS
+            == "0xC5d563A36AE78145C45a50134d48A1215220f80a"
+        )
+
+    def test_neg_risk_typed_data_domain_is_pinned(self) -> None:
+        typed = build_order_typed_data(
+            pinned_order(),
+            chain_id=137,
+            verifying_contract=NEG_RISK_CTF_EXCHANGE_ADDRESS,
+        )
+        assert typed["domain"] == {
+            "name": "Polymarket CTF Exchange",
+            "version": "1",
+            "chainId": 137,
+            "verifyingContract": NEG_RISK_CTF_EXCHANGE_ADDRESS,
+        }
+
+        message = encode_typed_data(full_message=typed)
+        assert "0x" + message.header.hex() == NEG_RISK_DOMAIN_SEPARATOR
+        # The struct hash is domain-independent: only the domain changed
+        assert "0x" + message.body.hex() == PINNED_STRUCT_HASH
+        assert (
+            "0x" + keccak(b"\x19\x01" + message.header + message.body).hex()
+            == NEG_RISK_DIGEST
+        )
+        assert NEG_RISK_DOMAIN_SEPARATOR != PINNED_DOMAIN_SEPARATOR
+
+    def test_neg_risk_signature_is_pinned(self) -> None:
+        signed = sign_clob_order(
+            pinned_order(),
+            chain_id=137,
+            private_key=TEST_PRIVATE_KEY,
+            verifying_contract=NEG_RISK_CTF_EXCHANGE_ADDRESS,
+        )
+        assert signed.signature == NEG_RISK_SIGNATURE
+        assert signed.signature != PINNED_SIGNATURE
+
+    async def test_build_order_neg_risk_signs_against_neg_risk_exchange(
+        self, polymarket: Polymarket, ethereum_wallet: Any
+    ) -> None:
+        polymarket.set_wallet(ethereum_wallet)
+        signed = polymarket.build_order(
+            TOKEN_ID_YES,
+            OrderSide.BUY,
+            price=Decimal("0.60"),
+            size=Decimal("100"),
+            salt=PINNED_SALT,
+            neg_risk=True,
+        )
+        assert signed.signature == NEG_RISK_SIGNATURE
+
+    async def test_build_buy_resolves_neg_risk_from_the_market(
+        self,
+        polymarket: Polymarket,
+        ethereum_wallet: Any,
+        clob_market_session: FakeHttpSession,
+    ) -> None:
+        """The CLOB market flag picks the NegRisk exchange for signing."""
+        polymarket.set_wallet(ethereum_wallet)
+        transaction = await polymarket.build_buy_transaction(
+            market_id=NEG_RISK_CONDITION_ID,
+            outcome_token_id=TOKEN_ID_YES,
+            amount=Decimal("60"),
+            max_price=Decimal("0.60"),
+            user_address=TEST_ADDRESS,
+        )
+
+        assert transaction.other_data["neg_risk"] is True
+        payload = transaction.other_data["clob_order"]
+        order = ClobOrder(
+            salt=payload["salt"],
+            maker=payload["maker"],
+            signer=payload["signer"],
+            taker=payload["taker"],
+            token_id=int(payload["tokenId"]),
+            maker_amount=int(payload["makerAmount"]),
+            taker_amount=int(payload["takerAmount"]),
+            expiration=int(payload["expiration"]),
+            nonce=int(payload["nonce"]),
+            fee_rate_bps=int(payload["feeRateBps"]),
+            side=OrderSide.BUY,
+            signature_type=SignatureType(payload["signatureType"]),
+        )
+        # The signature only recovers under the neg-risk domain
+        neg_risk_typed = build_order_typed_data(
+            order, chain_id=137, verifying_contract=NEG_RISK_CTF_EXCHANGE_ADDRESS
+        )
+        assert (
+            Account.recover_message(
+                encode_typed_data(full_message=neg_risk_typed),
+                signature=payload["signature"],
+            )
+            == TEST_ADDRESS
+        )
+        regular_typed = build_order_typed_data(order, chain_id=137)
+        assert (
+            Account.recover_message(
+                encode_typed_data(full_message=regular_typed),
+                signature=payload["signature"],
+            )
+            != TEST_ADDRESS
+        )
+        assert clob_market_session.requests_for(f"/markets/{NEG_RISK_CONDITION_ID}")
+
+    async def test_neg_risk_resolution_is_cached(
+        self,
+        polymarket: Polymarket,
+        ethereum_wallet: Any,
+        clob_market_session: FakeHttpSession,
+    ) -> None:
+        polymarket.set_wallet(ethereum_wallet)
+        for _ in range(3):
+            await polymarket.build_buy_transaction(
+                NEG_RISK_CONDITION_ID,
+                TOKEN_ID_YES,
+                Decimal("60"),
+                Decimal("0.60"),
+                TEST_ADDRESS,
+            )
+
+        assert (
+            len(clob_market_session.requests_for(f"/markets/{NEG_RISK_CONDITION_ID}"))
+            == 1
+        )
+
+    async def test_parsed_market_primes_the_neg_risk_cache(
+        self,
+        polymarket: Polymarket,
+        ethereum_wallet: Any,
+        clob_market_session: FakeHttpSession,
+    ) -> None:
+        """A market already read through get_market needs no extra request."""
+        polymarket.set_wallet(ethereum_wallet)
+        await polymarket.get_market(NEG_RISK_CONDITION_ID)
+
+        transaction = await polymarket.build_sell_transaction(
+            NEG_RISK_CONDITION_ID,
+            TOKEN_ID_YES,
+            Decimal("100"),
+            Decimal("0.60"),
+            TEST_ADDRESS,
+        )
+
+        assert transaction.other_data["neg_risk"] is True
+        assert (
+            len(clob_market_session.requests_for(f"/markets/{NEG_RISK_CONDITION_ID}"))
+            == 1
+        )
+
+    async def test_explicit_neg_risk_skips_resolution(
+        self,
+        polymarket: Polymarket,
+        ethereum_wallet: Any,
+        clob_market_session: FakeHttpSession,
+    ) -> None:
+        polymarket.set_wallet(ethereum_wallet)
+        transaction = await polymarket.build_buy_transaction(
+            "0x" + "99" * 32,  # unknown market: no canned response exists
+            TOKEN_ID_YES,
+            Decimal("60"),
+            Decimal("0.60"),
+            TEST_ADDRESS,
+            neg_risk=True,
+        )
+
+        assert transaction.other_data["neg_risk"] is True
+        assert clob_market_session.requests == []
+
+    async def test_regular_market_keeps_the_ctf_exchange(
+        self, polymarket: Polymarket, ethereum_wallet: Any
+    ) -> None:
+        polymarket.set_wallet(ethereum_wallet)
+        transaction = await polymarket.build_buy_transaction(
+            CONDITION_ID,
+            TOKEN_ID_YES,
+            Decimal("60"),
+            Decimal("0.60"),
+            TEST_ADDRESS,
+        )
+        assert transaction.other_data["neg_risk"] is False
+
     async def test_place_buy_posts_signed_order(
         self, polygon_blockchain: EthereumBlockchain, ethereum_wallet: Any
     ) -> None:
@@ -1280,7 +1590,9 @@ class TestRedeemTransaction:
             ).hex()
         )
 
-        tx_data = transaction.other_data["tx_data"]
+        assert set(transaction.other_data) == {UNSIGNED_TX_DATA_KEY, "market_id"}
+        assert transaction.other_data["market_id"] == CONDITION_ID
+        tx_data = unsigned_tx_params(transaction)
         assert str(tx_data["data"]).lower() == expected_data
         assert tx_data["to"] == CONDITIONAL_TOKENS_ADDRESS
         assert tx_data["from"] == TEST_ADDRESS
@@ -1309,7 +1621,7 @@ class TestRedeemTransaction:
         transaction = await strategy.build_redeem_transaction(
             CONDITION_ID, TEST_ADDRESS
         )
-        tx_data = transaction.other_data["tx_data"]
+        tx_data = unsigned_tx_params(transaction)
         # Uncapped fee would be 21 gwei; the 10 gwei cap must apply
         assert tx_data["maxFeePerGas"] == 10_000_000_000
         assert tx_data["maxPriorityFeePerGas"] == 1_000_000_000
@@ -1374,6 +1686,94 @@ class TestApprovals:
         with pytest.raises(ValueError, match="No wallet is bound"):
             await polymarket.place_conditional_tokens_approval()
 
+    async def test_uncapped_approve_uses_the_node_fees(
+        self,
+        polymarket: Polymarket,
+        ethereum_wallet: Any,
+        rpc_provider: FakeRPCProvider,
+    ) -> None:
+        """Baseline for the cap test: 10 gwei base fee + 1 gwei tip."""
+        polymarket.set_wallet(ethereum_wallet)
+        await polymarket.approve_collateral(Decimal("75"))
+        await drain_background_tasks(ethereum_wallet)
+
+        raw_tx_hex = rpc_provider.calls_for("eth_sendRawTransaction")[0][0]
+        decoded = TypedTransaction.from_bytes(HexBytes(raw_tx_hex)).as_dict()
+        assert decoded["maxFeePerGas"] == 21_000_000_000
+        assert decoded["maxPriorityFeePerGas"] == 1_000_000_000
+
+    async def test_approve_collateral_honours_the_gas_cap(
+        self,
+        polymarket_config: PolymarketConfiguration,
+        polygon_blockchain: EthereumBlockchain,
+        ethereum_wallet: Any,
+        rpc_provider: FakeRPCProvider,
+    ) -> None:
+        """Regression: approvals used to bypass max_gas_price_gwei entirely."""
+        strategy = Polymarket(
+            polymarket_config,
+            polygon_blockchain,
+            wallet=ethereum_wallet,
+            max_gas_price_gwei=10,
+        )
+
+        transaction = await strategy.approve_collateral(Decimal("75"))
+        await drain_background_tasks(ethereum_wallet)
+
+        assert transaction.current_state == BlockchainTransactionState.BROADCASTED
+        raw_tx_hex = rpc_provider.calls_for("eth_sendRawTransaction")[0][0]
+        decoded = TypedTransaction.from_bytes(HexBytes(raw_tx_hex)).as_dict()
+        # Uncapped the fee would be 21 gwei (see the baseline above)
+        assert decoded["maxFeePerGas"] == 10_000_000_000
+        assert decoded["maxPriorityFeePerGas"] == 1_000_000_000
+        # The calldata is untouched by the cap
+        expected_data = (
+            SEL_APPROVE
+            + CTF_EXCHANGE_ADDRESS[2:].lower().rjust(64, "0")
+            + f"{75_000_000:064x}"
+        )
+        assert HexBytes(decoded["data"]).to_0x_hex() == expected_data
+
+    async def test_conditional_tokens_approval_honours_the_gas_cap(
+        self,
+        polymarket_config: PolymarketConfiguration,
+        polygon_blockchain: EthereumBlockchain,
+        ethereum_wallet: Any,
+        rpc_provider: FakeRPCProvider,
+    ) -> None:
+        strategy = Polymarket(
+            polymarket_config,
+            polygon_blockchain,
+            wallet=ethereum_wallet,
+            max_gas_price_gwei=10,
+        )
+
+        await strategy.place_conditional_tokens_approval()
+        await drain_background_tasks(ethereum_wallet)
+
+        raw_tx_hex = rpc_provider.calls_for("eth_sendRawTransaction")[0][0]
+        decoded = TypedTransaction.from_bytes(HexBytes(raw_tx_hex)).as_dict()
+        assert decoded["maxFeePerGas"] == 10_000_000_000
+
+    def test_gas_configuration_wraps_the_wallet_settings(
+        self,
+        polymarket_config: PolymarketConfiguration,
+        polygon_blockchain: EthereumBlockchain,
+        ethereum_wallet: Any,
+    ) -> None:
+        uncapped = Polymarket(polymarket_config, polygon_blockchain)
+        assert uncapped._gas_configuration(ethereum_wallet) is None
+
+        capped = Polymarket(polymarket_config, polygon_blockchain, max_gas_price_gwei=7)
+        configuration = capped._gas_configuration(ethereum_wallet)
+        assert isinstance(configuration, GasPriceCappedConfiguration)
+        assert configuration.max_gas_price_gwei == 7
+        # Estimation settings are inherited from the wallet unchanged
+        assert configuration.gas_mode == ethereum_wallet.gas_configuration.gas_mode
+        assert configuration.default_gas == (
+            ethereum_wallet.gas_configuration.default_gas
+        )
+
 
 # === Facade wiring ===
 
@@ -1397,6 +1797,16 @@ class TestFacade:
         strategy = facade._protocol_strategies["Polymarket"]
         assert isinstance(strategy, Polymarket)
         assert strategy._max_gas_price_gwei == 25
+
+    def test_strategies_conform_to_the_protocol(
+        self, facade: PolymarketBettingMarket, polymarket: Polymarket
+    ) -> None:
+        """Polymarket fulfils the runtime-checkable betting-market protocol."""
+        assert isinstance(polymarket, ProtocolImplementation)
+        strategies = list(facade._protocol_strategies.values())
+        assert strategies
+        for strategy in strategies:
+            assert isinstance(strategy, ProtocolImplementation)
 
     def test_set_wallet_forwards_to_strategies(
         self, facade: PolymarketBettingMarket, ethereum_wallet: Any

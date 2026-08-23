@@ -49,6 +49,7 @@ from blockchainpype.evm.dapp.erc20 import (
     ERC20ContractConfiguration,
     ERC20Token,
 )
+from blockchainpype.evm.dapp.unsigned import build_unsigned_transaction
 from blockchainpype.evm.transaction import EthereumTransaction
 from blockchainpype.evm.wallet.wallet import EthereumWallet
 
@@ -226,7 +227,8 @@ class AaveV3:
     ``build_*`` methods require a bound wallet (constructor ``wallet`` kwarg or
     :meth:`set_wallet`) and return an **unsigned** :class:`EthereumTransaction`
     in ``PENDING_BROADCAST`` state; the built web3 transaction parameters are
-    exposed in ``other_data["tx_params"]`` so callers can sign and broadcast
+    exposed in ``other_data[UNSIGNED_TX_DATA_KEY]`` (see
+    :mod:`blockchainpype.evm.dapp.unsigned`) so callers can sign and broadcast
     via ``wallet.sign_and_send_transaction``.
     """
 
@@ -325,16 +327,13 @@ class AaveV3:
         """Build an unsigned, trackable transaction for a Pool function call.
 
         The bound wallet builds the web3 transaction parameters (calldata, gas
-        and fees) which are carried in ``other_data["tx_params"]``; the
-        returned transaction is neither signed nor broadcast.
+        and fees) which are carried in ``other_data[UNSIGNED_TX_DATA_KEY]``;
+        the returned transaction is neither signed nor broadcast.
         """
         wallet = self._require_wallet()
         tx_params = await wallet.build_transaction(function=function)
-        return EthereumTransaction(
-            client_operation_id=f"aave-v3-{operation}-{uuid.uuid4().hex}",
-            owner_identifier=wallet.identifier,
-            creation_timestamp=wallet.current_timestamp,
-            other_data={"tx_params": tx_params},
+        return build_unsigned_transaction(
+            f"aave-v3-{operation}-{uuid.uuid4().hex}", wallet, tx_params
         )
 
     # === Read paths (wallet-less) ===

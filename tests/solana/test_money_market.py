@@ -43,6 +43,7 @@ from blockchainpype.dapps.money_market import (
     CollateralMode,
     InterestRateMode,
     ProtocolConfiguration,
+    ProtocolImplementation,
 )
 from blockchainpype.initializer import BlockchainsInitializer, SupportedBlockchainType
 from blockchainpype.solana.asset import SolanaAssetData
@@ -451,6 +452,68 @@ def ata(owner: SolanaAddress, mint: str) -> Pubkey:
     return get_associated_token_address(owner.raw, Pubkey.from_string(mint))
 
 
+def compiled_instructions(transaction: SolanaTransaction):
+    """The compiled instructions of a built (unsigned) transaction."""
+    raw = transaction.raw_transaction
+    assert raw is not None
+    return raw.message.instructions
+
+
+def compiled_data(transaction: SolanaTransaction) -> list[bytes]:
+    """The exact data bytes of every instruction, in order."""
+    return [bytes(compiled.data) for compiled in compiled_instructions(transaction)]
+
+
+def compiled_accounts(transaction: SolanaTransaction, index: int) -> list[Pubkey]:
+    """Resolve one compiled instruction's account indices back to pubkeys."""
+    raw = transaction.raw_transaction
+    assert raw is not None
+    message = raw.message
+    compiled = message.instructions[index]
+    return [message.account_keys[i] for i in compiled.accounts]
+
+
+@pytest.fixture
+def obligation_bytes(user, usdc_reserve, wsol_reserve):
+    """Obligation with one USDC collateral deposit and one wSOL borrow.
+
+    2 cUSDC deposited (6 decimals) and 4 SOL borrowed at cumulative rate
+    1.0 wad (9 decimals).
+    """
+    return build_obligation_bytes(
+        owner=user.raw,
+        lending_market=Pubkey.from_string(MAIN_POOL_LENDING_MARKET),
+        deposited_value_wads=10_000 * WAD,
+        borrowed_value_wads=4_000 * WAD,
+        allowed_borrow_value_wads=7_500 * WAD,
+        unhealthy_borrow_value_wads=8_000 * WAD,
+        deposits=[(Pubkey.from_string(usdc_reserve.address), 2_000_000, 2 * WAD)],
+        borrows=[
+            (Pubkey.from_string(wsol_reserve.address), WAD, 4 * 10**9 * WAD, 600 * WAD)
+        ],
+    )
+
+
+@pytest.fixture
+def obligation_rpc_client(
+    blockhash,
+    obligation_bytes,
+    usdc_reserve,
+    usdc_reserve_bytes,
+    wsol_reserve,
+    wsol_reserve_bytes,
+):
+    """RPC client serving the obligation and both reserve accounts."""
+    return make_rpc_client(
+        blockhash=blockhash,
+        accounts={
+            Pubkey.from_string(USER_OBLIGATION): obligation_bytes,
+            Pubkey.from_string(usdc_reserve.address): usdc_reserve_bytes,
+            Pubkey.from_string(wsol_reserve.address): wsol_reserve_bytes,
+        },
+    )
+
+
 # === Binary parsers ===
 
 
@@ -776,7 +839,83 @@ class TestInstructionEncoding:
             (TOKEN_PROGRAM_ID, False, False),
         ]
 
+    def test_refresh_reserve_instruction(self, solend, usdc_reserve):
+        instruction = solend.build_refresh_reserve_instruction(usdc_reserve)
+
+        assert instruction.program_id == Pubkey.from_string(SOLEND_PROGRAM)
+        # No arguments: the discriminant byte alone
+        assert instruction.data == bytes([3])
+        assert account_metas(instruction) == [
+            (Pubkey.from_string(usdc_reserve.address), False, True),
+            (Pubkey.from_string(usdc_reserve.pyth_oracle), False, False),
+            (Pubkey.from_string(usdc_reserve.switchboard_oracle), False, False),
+        ]
+
+    def test_refresh_obligation_instruction(
+        self, solend, user, usdc_reserve, wsol_reserve
+    ):
+        instruction = solend.build_refresh_obligation_instruction(
+            user, [usdc_reserve, wsol_reserve]
+        )
+
+        assert instruction.program_id == Pubkey.from_string(SOLEND_PROGRAM)
+        assert instruction.data == bytes([7])
+        # Obligation (writable) followed by its reserves, read-only, in order
+        assert account_metas(instruction) == [
+            (Pubkey.from_string(USER_OBLIGATION), False, True),
+            (Pubkey.from_string(usdc_reserve.address), False, False),
+            (Pubkey.from_string(wsol_reserve.address), False, False),
+        ]
+
+    def test_refresh_obligation_without_reserves(self, solend, user):
+        instruction = solend.build_refresh_obligation_instruction(user, [])
+        assert account_metas(instruction) == [
+            (Pubkey.from_string(USER_OBLIGATION), False, True)
+        ]
+
+    def test_refresh_prefix_deduplicates_reserves(
+        self, solend, user, usdc_reserve, wsol_reserve
+    ):
+        """A reserve used as both collateral and borrow is refreshed once."""
+        obligation = SolendObligationState.from_bytes(
+            build_obligation_bytes(
+                owner=user.raw,
+                lending_market=Pubkey.from_string(MAIN_POOL_LENDING_MARKET),
+                deposited_value_wads=WAD,
+                borrowed_value_wads=WAD,
+                allowed_borrow_value_wads=WAD,
+                unhealthy_borrow_value_wads=WAD,
+                deposits=[(Pubkey.from_string(usdc_reserve.address), 1, WAD)],
+                borrows=[(Pubkey.from_string(usdc_reserve.address), WAD, WAD, WAD)],
+            )
+        )
+
+        instructions = solend.build_obligation_refresh_instructions(
+            user, obligation, wsol_reserve
+        )
+
+        # RefreshReserve(usdc), RefreshReserve(wsol target), RefreshObligation
+        assert [bytes(i.data) for i in instructions] == [
+            bytes([3]),
+            bytes([3]),
+            bytes([7]),
+        ]
+        assert instructions[0].accounts[0].pubkey == Pubkey.from_string(
+            usdc_reserve.address
+        )
+        assert instructions[1].accounts[0].pubkey == Pubkey.from_string(
+            wsol_reserve.address
+        )
+        # The obligation still lists the duplicated reserve twice, as stored
+        assert account_metas(instructions[2]) == [
+            (Pubkey.from_string(USER_OBLIGATION), False, True),
+            (Pubkey.from_string(usdc_reserve.address), False, False),
+            (Pubkey.from_string(usdc_reserve.address), False, False),
+        ]
+
     def test_discriminants_match_solend_program_enum(self):
+        assert SolendInstruction.REFRESH_RESERVE == 3
+        assert SolendInstruction.REFRESH_OBLIGATION == 7
         assert SolendInstruction.BORROW_OBLIGATION_LIQUIDITY == 10
         assert SolendInstruction.REPAY_OBLIGATION_LIQUIDITY == 11
         assert (
@@ -858,48 +997,99 @@ class TestBuildTransactions:
         solend,
         usdc_asset,
         usdc_reserve,
-        usdc_reserve_bytes,
-        user,
-        blockhash,
+        obligation_rpc_client,
         monkeypatch,
     ):
-        client = make_rpc_client(
-            blockhash=blockhash,
-            accounts={Pubkey.from_string(usdc_reserve.address): usdc_reserve_bytes},
-        )
-        monkeypatch.setattr(solend.blockchain, "rpc_client", client)
+        monkeypatch.setattr(solend.blockchain, "rpc_client", obligation_rpc_client)
 
         transaction = await solend.build_withdraw_transaction(
             usdc_asset, Decimal("1"), USER_ADDRESS
         )
 
-        raw = transaction.raw_transaction
-        assert raw is not None
-        compiled = raw.message.instructions[0]
         # 1 USDC = 1_000_000 raw liquidity -> 800_000 cTokens at rate 0.8
-        assert compiled.data == bytes([15]) + (800_000).to_bytes(8, "little")
-        # The reserve account was fetched with the blockchain's commitment
-        client.get_account_info.assert_awaited_once_with(
+        assert compiled_data(transaction)[-1] == bytes([15]) + (800_000).to_bytes(
+            8, "little"
+        )
+        # The obligation is read first (for the refresh set), then the reserve
+        # whose exchange rate converts the amount - both at the blockchain's
+        # commitment
+        assert [
+            call.args[0]
+            for call in obligation_rpc_client.get_account_info.await_args_list
+        ] == [
+            Pubkey.from_string(USER_OBLIGATION),
             Pubkey.from_string(usdc_reserve.address),
-            commitment=solend.blockchain.commitment,
+        ]
+        for call in obligation_rpc_client.get_account_info.await_args_list:
+            assert call.kwargs == {"commitment": solend.blockchain.commitment}
+
+    async def test_build_withdraw_all_uses_the_deposited_collateral(
+        self, solend, usdc_asset, obligation_rpc_client, monkeypatch
+    ):
+        """withdraw_all resolves the obligation's exact deposited cToken amount."""
+        monkeypatch.setattr(solend.blockchain, "rpc_client", obligation_rpc_client)
+
+        transaction = await solend.build_withdraw_transaction(
+            usdc_asset, Decimal("0"), USER_ADDRESS, withdraw_all=True
         )
 
-    async def test_build_borrow_scales_nine_decimals(
-        self, solend, sol_asset, user, blockhash, monkeypatch
+        # The obligation deposit entry holds 2_000_000 cUSDC
+        assert compiled_data(transaction)[-1] == bytes([15]) + (2_000_000).to_bytes(
+            8, "little"
+        )
+        # No reserve-state read is needed: only the obligation is fetched
+        assert [
+            call.args[0]
+            for call in obligation_rpc_client.get_account_info.await_args_list
+        ] == [Pubkey.from_string(USER_OBLIGATION)]
+
+    async def test_build_withdraw_all_without_deposit_raises(
+        self, solend, sol_asset, obligation_rpc_client, monkeypatch
     ):
-        client = make_rpc_client(blockhash=blockhash)
+        """wSOL is borrowed, not deposited, so there is nothing to withdraw."""
+        monkeypatch.setattr(solend.blockchain, "rpc_client", obligation_rpc_client)
+
+        with pytest.raises(ValueError, match="holds no collateral"):
+            await solend.build_withdraw_transaction(
+                sol_asset, Decimal("0"), USER_ADDRESS, withdraw_all=True
+            )
+
+    async def test_build_withdraw_without_obligation_raises(
+        self, solend, usdc_asset, blockhash, monkeypatch
+    ):
+        client = make_rpc_client(blockhash=blockhash, accounts={})
         monkeypatch.setattr(solend.blockchain, "rpc_client", client)
+
+        with pytest.raises(ValueError, match="No Solend obligation account"):
+            await solend.build_withdraw_transaction(
+                usdc_asset, Decimal("1"), USER_ADDRESS
+            )
+
+    async def test_build_borrow_scales_nine_decimals(
+        self, solend, sol_asset, obligation_rpc_client, monkeypatch
+    ):
+        monkeypatch.setattr(solend.blockchain, "rpc_client", obligation_rpc_client)
 
         transaction = await solend.build_borrow_transaction(
             sol_asset, Decimal("0.5"), InterestRateMode.VARIABLE, USER_ADDRESS
         )
 
-        raw = transaction.raw_transaction
-        assert raw is not None
-        compiled = raw.message.instructions[0]
         # Decimal("0.5") at 9 decimals -> 500_000_000 raw units
-        assert compiled.data == bytes([10]) + (500_000_000).to_bytes(8, "little")
+        assert compiled_data(transaction)[-1] == bytes([10]) + (500_000_000).to_bytes(
+            8, "little"
+        )
         assert transaction.client_operation_id.startswith(f"solend-borrow-{WSOL_MINT}")
+
+    async def test_build_borrow_without_obligation_raises(
+        self, solend, sol_asset, blockhash, monkeypatch
+    ):
+        client = make_rpc_client(blockhash=blockhash, accounts={})
+        monkeypatch.setattr(solend.blockchain, "rpc_client", client)
+
+        with pytest.raises(ValueError, match="No Solend obligation account"):
+            await solend.build_borrow_transaction(
+                sol_asset, Decimal("1"), InterestRateMode.VARIABLE, USER_ADDRESS
+            )
 
     async def test_build_repay_transaction(
         self, solend, usdc_asset, blockhash, monkeypatch
@@ -910,11 +1100,10 @@ class TestBuildTransactions:
         transaction = await solend.build_repay_transaction(
             usdc_asset, Decimal("0.000001"), InterestRateMode.VARIABLE, USER_ADDRESS
         )
-        raw = transaction.raw_transaction
-        assert raw is not None
-        compiled = raw.message.instructions[0]
         # Smallest representable unit at 6 decimals -> 1 raw unit
-        assert compiled.data == bytes([11]) + (1).to_bytes(8, "little")
+        assert compiled_data(transaction)[-1] == bytes([11]) + (1).to_bytes(8, "little")
+        # Repay needs no obligation read: only the repay reserve is refreshed
+        client.get_account_info.assert_not_awaited()
 
     async def test_build_repay_all_uses_u64_max(
         self, solend, usdc_asset, blockhash, monkeypatch
@@ -929,10 +1118,140 @@ class TestBuildTransactions:
             USER_ADDRESS,
             repay_all=True,
         )
-        raw = transaction.raw_transaction
-        assert raw is not None
-        compiled = raw.message.instructions[0]
-        assert compiled.data == bytes([11]) + (2**64 - 1).to_bytes(8, "little")
+        assert compiled_data(transaction)[-1] == bytes([11]) + (2**64 - 1).to_bytes(
+            8, "little"
+        )
+
+    async def test_supply_holds_only_the_deposit_instruction(
+        self, solend, usdc_asset, blockhash, monkeypatch
+    ):
+        """Deposit carries its own oracles, so it refreshes the reserve itself."""
+        client = make_rpc_client(blockhash=blockhash)
+        monkeypatch.setattr(solend.blockchain, "rpc_client", client)
+
+        transaction = await solend.build_supply_transaction(
+            usdc_asset, Decimal("1.5"), USER_ADDRESS
+        )
+
+        assert compiled_data(transaction) == [
+            bytes([14]) + (1_500_000).to_bytes(8, "little")
+        ]
+
+    async def test_withdraw_instruction_sequence(
+        self,
+        solend,
+        usdc_asset,
+        usdc_reserve,
+        wsol_reserve,
+        obligation_rpc_client,
+        monkeypatch,
+    ):
+        """RefreshReserve per obligation reserve, RefreshObligation, withdraw."""
+        monkeypatch.setattr(solend.blockchain, "rpc_client", obligation_rpc_client)
+
+        transaction = await solend.build_withdraw_transaction(
+            usdc_asset, Decimal("1"), USER_ADDRESS
+        )
+
+        assert compiled_data(transaction) == [
+            bytes([3]),
+            bytes([3]),
+            bytes([7]),
+            bytes([15]) + (800_000).to_bytes(8, "little"),
+        ]
+        # Deposit reserve first, then the borrow reserve (obligation order)
+        assert compiled_accounts(transaction, 0) == [
+            Pubkey.from_string(usdc_reserve.address),
+            Pubkey.from_string(usdc_reserve.pyth_oracle),
+            Pubkey.from_string(usdc_reserve.switchboard_oracle),
+        ]
+        assert compiled_accounts(transaction, 1) == [
+            Pubkey.from_string(wsol_reserve.address),
+            Pubkey.from_string(wsol_reserve.pyth_oracle),
+            Pubkey.from_string(wsol_reserve.switchboard_oracle),
+        ]
+        assert compiled_accounts(transaction, 2) == [
+            Pubkey.from_string(USER_OBLIGATION),
+            Pubkey.from_string(usdc_reserve.address),
+            Pubkey.from_string(wsol_reserve.address),
+        ]
+
+    async def test_borrow_instruction_sequence(
+        self,
+        solend,
+        sol_asset,
+        usdc_reserve,
+        wsol_reserve,
+        obligation_rpc_client,
+        monkeypatch,
+    ):
+        monkeypatch.setattr(solend.blockchain, "rpc_client", obligation_rpc_client)
+
+        transaction = await solend.build_borrow_transaction(
+            sol_asset, Decimal("0.5"), InterestRateMode.VARIABLE, USER_ADDRESS
+        )
+
+        assert compiled_data(transaction) == [
+            bytes([3]),
+            bytes([3]),
+            bytes([7]),
+            bytes([10]) + (500_000_000).to_bytes(8, "little"),
+        ]
+        assert compiled_accounts(transaction, 0)[0] == Pubkey.from_string(
+            usdc_reserve.address
+        )
+        assert compiled_accounts(transaction, 1)[0] == Pubkey.from_string(
+            wsol_reserve.address
+        )
+        assert compiled_accounts(transaction, 2) == [
+            Pubkey.from_string(USER_OBLIGATION),
+            Pubkey.from_string(usdc_reserve.address),
+            Pubkey.from_string(wsol_reserve.address),
+        ]
+
+    async def test_repay_instruction_sequence(
+        self, solend, usdc_asset, usdc_reserve, blockhash, monkeypatch
+    ):
+        """Repay only needs the repay reserve refreshed."""
+        client = make_rpc_client(blockhash=blockhash)
+        monkeypatch.setattr(solend.blockchain, "rpc_client", client)
+
+        transaction = await solend.build_repay_transaction(
+            usdc_asset, Decimal("1"), InterestRateMode.VARIABLE, USER_ADDRESS
+        )
+
+        assert compiled_data(transaction) == [
+            bytes([3]),
+            bytes([11]) + (1_000_000).to_bytes(8, "little"),
+        ]
+        assert compiled_accounts(transaction, 0) == [
+            Pubkey.from_string(usdc_reserve.address),
+            Pubkey.from_string(usdc_reserve.pyth_oracle),
+            Pubkey.from_string(usdc_reserve.switchboard_oracle),
+        ]
+
+    async def test_withdraw_refreshes_a_reserve_outside_the_obligation(
+        self,
+        solend,
+        sol_asset,
+        usdc_reserve,
+        wsol_reserve,
+        obligation_rpc_client,
+        monkeypatch,
+    ):
+        """The target reserve is refreshed even when only borrowed, not deposited."""
+        monkeypatch.setattr(solend.blockchain, "rpc_client", obligation_rpc_client)
+
+        transaction = await solend.build_withdraw_transaction(
+            sol_asset, Decimal("0.5"), USER_ADDRESS
+        )
+
+        # wSOL is already an obligation (borrow) reserve, so it is refreshed once
+        assert compiled_data(transaction)[:3] == [bytes([3]), bytes([3]), bytes([7])]
+        assert [compiled_accounts(transaction, i)[0] for i in (0, 1)] == [
+            Pubkey.from_string(usdc_reserve.address),
+            Pubkey.from_string(wsol_reserve.address),
+        ]
 
     async def test_zero_amount_raises(self, solend, usdc_asset):
         with pytest.raises(ValueError, match="must be positive"):
@@ -1070,28 +1389,6 @@ class TestUserAccountData:
 
 class TestPositions:
     """Test lending/borrowing positions derived from the obligation entries."""
-
-    @pytest.fixture
-    def obligation_bytes(self, user, usdc_reserve, wsol_reserve):
-        return build_obligation_bytes(
-            owner=user.raw,
-            lending_market=Pubkey.from_string(MAIN_POOL_LENDING_MARKET),
-            deposited_value_wads=10_000 * WAD,
-            borrowed_value_wads=4_000 * WAD,
-            allowed_borrow_value_wads=7_500 * WAD,
-            unhealthy_borrow_value_wads=8_000 * WAD,
-            # 2 cUSDC deposited (6 decimals)
-            deposits=[(Pubkey.from_string(usdc_reserve.address), 2_000_000, 2 * WAD)],
-            # 4 SOL borrowed at cumulative rate 1.0 wad (9 decimals)
-            borrows=[
-                (
-                    Pubkey.from_string(wsol_reserve.address),
-                    WAD,
-                    4 * 10**9 * WAD,
-                    600 * WAD,
-                )
-            ],
-        )
 
     @pytest.fixture
     def rpc_client(
@@ -1235,6 +1532,19 @@ class TestConfiguration:
 # === Facade dispatch ===
 
 
+class TestProtocolConformance:
+    """Solend fulfils the runtime-checkable money-market protocol."""
+
+    def test_strategy_conforms(self, solend):
+        assert isinstance(solend, ProtocolImplementation)
+
+    def test_registered_strategies_conform(self, money_market):
+        strategies = list(money_market._protocol_strategies.values())
+        assert strategies
+        for strategy in strategies:
+            assert isinstance(strategy, ProtocolImplementation)
+
+
 class TestFacadeDispatch:
     """Test dispatch through the MoneyMarket base class."""
 
@@ -1266,17 +1576,33 @@ class TestFacadeDispatch:
         assert compiled.data == bytes([14]) + (1_500_000).to_bytes(8, "little")
 
     async def test_borrow_dispatches_with_default_rate_mode(
-        self, money_market, sol_asset, blockhash, monkeypatch
+        self, money_market, sol_asset, obligation_rpc_client, monkeypatch
     ):
-        client = make_rpc_client(blockhash=blockhash)
-        monkeypatch.setattr(money_market.blockchain, "rpc_client", client)
+        monkeypatch.setattr(
+            money_market.blockchain, "rpc_client", obligation_rpc_client
+        )
 
         transaction = await money_market.borrow(sol_asset, Decimal("2"), USER_ADDRESS)
 
-        raw = transaction.raw_transaction
-        assert raw is not None
-        compiled = raw.message.instructions[0]
-        assert compiled.data == bytes([10]) + (2_000_000_000).to_bytes(8, "little")
+        assert compiled_data(transaction)[-1] == bytes([10]) + (2_000_000_000).to_bytes(
+            8, "little"
+        )
+
+    async def test_withdraw_all_dispatches_to_solend(
+        self, money_market, usdc_asset, obligation_rpc_client, monkeypatch
+    ):
+        """The facade's withdraw_all reaches the Solend strategy."""
+        monkeypatch.setattr(
+            money_market.blockchain, "rpc_client", obligation_rpc_client
+        )
+
+        transaction = await money_market.withdraw(
+            usdc_asset, Decimal("0"), USER_ADDRESS, withdraw_all=True
+        )
+
+        assert compiled_data(transaction)[-1] == bytes([15]) + (2_000_000).to_bytes(
+            8, "little"
+        )
 
     async def test_unknown_protocol_raises(self, money_market, usdc_asset):
         with pytest.raises(ValueError, match="Unsupported protocol"):

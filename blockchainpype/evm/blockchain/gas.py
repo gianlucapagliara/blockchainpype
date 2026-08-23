@@ -162,7 +162,7 @@ class GasConfiguration(BaseModel):
                 avg_reward = sum(rewards) // len(rewards)
 
                 return {
-                    "gas": int(math.ceil(gas * 1.3)),
+                    "gas": min(int(math.ceil(gas * 1.3)), self.max_gas),
                     "maxPriorityFeePerGas": avg_reward,
                     "maxFeePerGas": avg_reward + next_base_fee,
                 }
@@ -204,7 +204,7 @@ class GasConfiguration(BaseModel):
                 gas = int(await w3.eth.estimate_gas(transaction_params))
 
         return {
-            "gas": int(math.ceil(gas * 1.3)),
+            "gas": min(int(math.ceil(gas * 1.3)), self.max_gas),
             "gasPrice": int(math.ceil(gas_price * gas_price_multiplier)),
         }
 

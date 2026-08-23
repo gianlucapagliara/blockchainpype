@@ -48,13 +48,15 @@ class SolanaMoneyMarket(MoneyMarket):
         execution helpers (e.g. ``Solend.place_transaction``) to sign and
         broadcast previously built transactions.
 
+        ``set_wallet`` is part of the money-market
+        :class:`~blockchainpype.dapps.money_market.ProtocolImplementation`
+        contract, so every registered strategy is called directly.
+
         Args:
             wallet: The wallet to bind, or None to unbind
         """
         for strategy in self._protocol_strategies.values():
-            set_wallet = getattr(strategy, "set_wallet", None)
-            if callable(set_wallet):
-                set_wallet(wallet)
+            strategy.set_wallet(wallet)
 
     async def is_position_safe(
         self,

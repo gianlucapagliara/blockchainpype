@@ -9,6 +9,10 @@ index) followed by little-endian fields. This module implements:
 - Real instruction building for the four core obligation flows
   (deposit-and-collateralize, withdraw-and-redeem, borrow, repay) with the
   exact account layouts of the on-chain program
+- The ``RefreshReserve`` / ``RefreshObligation`` instructions the program
+  requires in the same transaction as withdraw/borrow/repay (see
+  :meth:`Solend.build_refresh_reserve_instruction` and
+  :meth:`Solend.build_refresh_obligation_instruction`)
 - Binary parsers for the on-chain ``Reserve`` and ``Obligation`` account
   layouts (documented field offsets below)
 - Market data, account data, and position reads derived from those accounts
@@ -99,6 +103,8 @@ class SolendInstruction(IntEnum):
     ``token-lending/program/src/instruction.rs``.
     """
 
+    REFRESH_RESERVE = 3
+    REFRESH_OBLIGATION = 7
     BORROW_OBLIGATION_LIQUIDITY = 10
     REPAY_OBLIGATION_LIQUIDITY = 11
     DEPOSIT_RESERVE_LIQUIDITY_AND_OBLIGATION_COLLATERAL = 14
@@ -669,10 +675,16 @@ class Solend:
       collateral toggle) and ``build_collateral_transaction`` is unsupported.
     - Solend only has variable-rate borrows; ``interest_rate_mode`` is
       accepted for contract compatibility and ignored.
-    - On-chain execution of withdraw/borrow additionally requires refreshed
-      reserves and obligation (``RefreshReserve``/``RefreshObligation``
-      instructions) in the same transaction; building those refresh
-      instructions is out of scope here and documented per method.
+    - Staleness: the program rejects an instruction touching a reserve (or an
+      obligation) that has not been refreshed in the current slot, so
+      :meth:`build_withdraw_transaction`, :meth:`build_borrow_transaction` and
+      :meth:`build_repay_transaction` prepend the required
+      ``RefreshReserve``/``RefreshObligation`` instructions to the same
+      transaction. :meth:`build_supply_transaction` needs none: Solend's
+      ``DepositReserveLiquidityAndObligationCollateral`` carries the reserve's
+      Pyth and Switchboard oracle accounts in its own account list (see
+      ``common/idl/solend.json``) and refreshes the reserve itself, which is
+      exactly why the withdraw/borrow/repay layouts do not list oracles.
     """
 
     def __init__(
@@ -915,6 +927,28 @@ class Solend:
             raise ValueError(f"Solend reserve account {reserve.address} not found")
         return SolendReserveState.from_bytes(data)
 
+    async def require_obligation_state(
+        self, owner: SolanaAddress
+    ) -> SolendObligationState:
+        """Fetch and parse a user's obligation, raising when it is missing.
+
+        Args:
+            owner (SolanaAddress): The obligation owner's wallet address
+
+        Returns:
+            SolendObligationState: The parsed obligation state
+
+        Raises:
+            ValueError: If the user has no obligation account for this market
+        """
+        obligation = await self.get_obligation_state(owner)
+        if obligation is None:
+            raise ValueError(
+                f"No Solend obligation account found for {owner.string} in "
+                f"lending market {self._lending_market.string}"
+            )
+        return obligation
+
     async def get_obligation_state(
         self, owner: SolanaAddress
     ) -> SolendObligationState | None:
@@ -1102,6 +1136,79 @@ class Solend:
         return positions
 
     # === Instruction building ===
+
+    def _program_instruction(
+        self, accounts: list[AccountMeta], data: bytes
+    ) -> Instruction:
+        """Build a raw instruction for the Solend program.
+
+        The simplified IDL in ``common/idl/solend.json`` is only a name
+        registry for the four core obligation instructions, so the refresh
+        instructions - which carry no arguments beyond their discriminant -
+        are constructed directly against the program id instead of going
+        through :meth:`SolanaProgram.create_instruction`.
+        """
+        return Instruction(
+            program_id=self.program.address.raw, accounts=accounts, data=data
+        )
+
+    def build_refresh_reserve_instruction(
+        self, reserve: SolendReserveConfiguration
+    ) -> Instruction:
+        """Build ``RefreshReserve`` (index 3) for a single reserve.
+
+        Accrues the reserve's interest and re-reads its oracle prices. The
+        program rejects any instruction touching a reserve that has not been
+        refreshed in the current slot.
+
+        Data: ``[3]`` (no arguments). Account layout::
+
+            0 [w] reserve
+            1 [ ] pyth price oracle
+            2 [ ] switchboard price feed oracle
+        """
+        accounts = [
+            AccountMeta(SolanaAddress.from_string(reserve.address).raw, False, True),
+            AccountMeta(
+                SolanaAddress.from_string(reserve.pyth_oracle).raw, False, False
+            ),
+            AccountMeta(
+                SolanaAddress.from_string(reserve.switchboard_oracle).raw, False, False
+            ),
+        ]
+        return self._program_instruction(
+            accounts, bytes([SolendInstruction.REFRESH_RESERVE])
+        )
+
+    def build_refresh_obligation_instruction(
+        self,
+        user: SolanaAddress,
+        reserves: Sequence[SolendReserveConfiguration],
+    ) -> Instruction:
+        """Build ``RefreshObligation`` (index 7) for a user's obligation.
+
+        Recomputes the obligation's collateral/borrow values from the
+        (already refreshed) reserves it references.
+
+        Data: ``[7]`` (no arguments). Account layout::
+
+            0 [w] obligation
+            1.. [ ] every deposit reserve, then every borrow reserve, in the
+                    exact order they are stored in the obligation account
+
+        Args:
+            user: The obligation owner's wallet address
+            reserves: The obligation's reserves, deposits first then borrows,
+                in obligation order (see :meth:`obligation_reserves`)
+        """
+        accounts = [AccountMeta(self.derive_obligation_address(user).raw, False, True)]
+        accounts.extend(
+            AccountMeta(SolanaAddress.from_string(reserve.address).raw, False, False)
+            for reserve in reserves
+        )
+        return self._program_instruction(
+            accounts, bytes([SolendInstruction.REFRESH_OBLIGATION])
+        )
 
     def build_deposit_instruction(
         self,
@@ -1329,20 +1436,94 @@ class Solend:
         """Generate a unique client operation id for a built transaction."""
         return f"solend-{action}-{mint}-{uuid.uuid4().hex}"
 
-    async def _wrap_instruction(
+    def obligation_reserves(
+        self, obligation: SolendObligationState
+    ) -> list[SolendReserveConfiguration]:
+        """Resolve an obligation's reserves: deposits first, then borrows.
+
+        The order mirrors the obligation account's own entry order, which is
+        exactly the order ``RefreshObligation`` expects its reserve accounts
+        in.
+
+        Args:
+            obligation (SolendObligationState): The parsed obligation
+
+        Returns:
+            list[SolendReserveConfiguration]: The referenced reserves, in
+                obligation order (a reserve used both as collateral and as a
+                borrow appears twice, as it does on-chain)
+
+        Raises:
+            ValueError: If the obligation references a reserve that is not
+                present in this strategy's configuration
+        """
+        reserves = [
+            self.reserve_configuration_for_address(deposit.deposit_reserve)
+            for deposit in obligation.deposits
+        ]
+        reserves.extend(
+            self.reserve_configuration_for_address(borrow.borrow_reserve)
+            for borrow in obligation.borrows
+        )
+        return reserves
+
+    def build_obligation_refresh_instructions(
         self,
-        instruction: Instruction,
+        user: SolanaAddress,
+        obligation: SolendObligationState,
+        target: SolendReserveConfiguration,
+    ) -> list[Instruction]:
+        """Build the refresh instructions an obligation instruction requires.
+
+        One ``RefreshReserve`` per distinct reserve involved (every obligation
+        reserve plus the instruction's own ``target`` reserve, which is
+        refreshed too even when the obligation does not reference it yet),
+        followed by a single ``RefreshObligation`` listing the obligation's
+        reserves in their stored order.
+
+        Args:
+            user (SolanaAddress): The obligation owner
+            obligation (SolendObligationState): The parsed obligation
+            target (SolendReserveConfiguration): The reserve the following
+                instruction operates on
+
+        Returns:
+            list[Instruction]: The refresh instructions, in the order they
+                must precede the operation
+        """
+        referenced_reserves = self.obligation_reserves(obligation)
+
+        distinct: list[SolendReserveConfiguration] = []
+        seen: set[str] = set()
+        for reserve in [*referenced_reserves, target]:
+            if reserve.address not in seen:
+                seen.add(reserve.address)
+                distinct.append(reserve)
+
+        instructions = [
+            self.build_refresh_reserve_instruction(reserve) for reserve in distinct
+        ]
+        instructions.append(
+            self.build_refresh_obligation_instruction(user, referenced_reserves)
+        )
+        return instructions
+
+    async def _wrap_instructions(
+        self,
+        instructions: Sequence[Instruction],
         user: SolanaAddress,
         client_operation_id: str,
     ) -> SolanaTransaction:
-        """Wrap an instruction into an unsigned tracked SolanaTransaction.
+        """Wrap instructions into an unsigned tracked SolanaTransaction.
 
         A legacy message is built with the user as fee payer and the current
         recent blockhash; the result carries the raw (unsigned) transaction
         and is never signed or broadcast here.
         """
         recent_blockhash = await self._blockchain.fetch_recent_blockhash()
-        message = Message.new_with_blockhash([instruction], user.raw, recent_blockhash)
+        message = Message.new_with_blockhash(
+            list(instructions), user.raw, recent_blockhash
+        )
         unsigned = Transaction.new_unsigned(message)
 
         return SolanaTransaction(
@@ -1384,6 +1565,10 @@ class Solend:
         liquidity is always deposited as obligation collateral;
         ``enable_as_collateral`` is ignored (Solend has no collateral toggle).
 
+        The transaction holds this single instruction: the deposit takes the
+        reserve's Pyth and Switchboard oracle accounts and refreshes the
+        reserve itself, so no separate ``RefreshReserve`` is needed.
+
         Args:
             asset: The asset to supply (mint must have a configured reserve)
             amount: The amount to supply, in decimal token units
@@ -1401,8 +1586,8 @@ class Solend:
         user = SolanaAddress.from_string(user_address)
 
         instruction = self.build_deposit_instruction(reserve, user, raw_amount)
-        return await self._wrap_instruction(
-            instruction,
+        return await self._wrap_instructions(
+            [instruction],
             user,
             client_operation_id or self._operation_id("supply", reserve.liquidity_mint),
         )
@@ -1412,6 +1597,7 @@ class Solend:
         asset: BlockchainAsset,
         amount: Decimal,
         user_address: str,
+        withdraw_all: bool = False,
         *,
         client_operation_id: str | None = None,
     ) -> SolanaTransaction:
@@ -1420,41 +1606,83 @@ class Solend:
         Uses ``WithdrawObligationCollateralAndRedeemReserveCollateral``. The
         requested ``amount`` is denominated in the underlying liquidity token
         and converted to collateral (cToken) units with the reserve's current
-        on-chain exchange rate. On-chain execution requires refreshed
-        reserve/obligation instructions in the same transaction, which are not
-        built here.
+        on-chain exchange rate.
+
+        With ``withdraw_all`` the collateral amount is the obligation's exact
+        deposited amount for the reserve, read from the obligation account.
+        Solend's withdraw instruction takes a collateral (cToken) amount and
+        the ``u64::MAX`` "full amount" sentinel is only documented for repay,
+        so the full position is resolved client-side instead of relying on it.
+
+        The instruction sequence is ``RefreshReserve`` for every reserve of the
+        obligation (plus this one), then ``RefreshObligation``, then the
+        withdraw itself: the program rejects stale reserves/obligations.
 
         Args:
             asset: The asset to withdraw
             amount: The amount to withdraw, in decimal liquidity token units
+                (ignored when ``withdraw_all`` is True)
             user_address: The withdrawing user
+            withdraw_all: Whether to withdraw the full deposited position
             client_operation_id: Optional tracking id; generated when omitted
 
         Returns:
             SolanaTransaction: The unsigned, trackable transaction
 
         Raises:
-            ValueError: If the amount converts to zero collateral units
+            ValueError: If the user has no obligation, the amount converts to
+                zero collateral units, or ``withdraw_all`` is requested for a
+                reserve the obligation holds no collateral in
         """
         await self._ensure_program()
         reserve = self.reserve_configuration_for_asset(asset)
-        raw_amount = self._raw_amount(asset, amount)
         user = SolanaAddress.from_string(user_address)
+        obligation = await self.require_obligation_state(user)
 
-        state = await self.get_reserve_state(reserve)
-        raw_collateral = state.liquidity_to_collateral(raw_amount)
-        if raw_collateral <= 0:
-            raise ValueError(
-                f"Withdraw amount {amount} converts to zero collateral units"
-            )
+        if withdraw_all:
+            raw_collateral = self._deposited_collateral(obligation, reserve)
+        else:
+            raw_amount = self._raw_amount(asset, amount)
+            state = await self.get_reserve_state(reserve)
+            raw_collateral = state.liquidity_to_collateral(raw_amount)
+            if raw_collateral <= 0:
+                raise ValueError(
+                    f"Withdraw amount {amount} converts to zero collateral units"
+                )
 
-        instruction = self.build_withdraw_instruction(reserve, user, raw_collateral)
-        return await self._wrap_instruction(
-            instruction,
+        instructions = self.build_obligation_refresh_instructions(
+            user, obligation, reserve
+        )
+        instructions.append(
+            self.build_withdraw_instruction(reserve, user, raw_collateral)
+        )
+        return await self._wrap_instructions(
+            instructions,
             user,
             client_operation_id
             or self._operation_id("withdraw", reserve.liquidity_mint),
         )
+
+    @staticmethod
+    def _deposited_collateral(
+        obligation: SolendObligationState, reserve: SolendReserveConfiguration
+    ) -> int:
+        """Sum the obligation's deposited collateral for one reserve.
+
+        Raises:
+            ValueError: If the obligation holds no collateral in the reserve
+        """
+        deposited = sum(
+            deposit.deposited_amount
+            for deposit in obligation.deposits
+            if str(deposit.deposit_reserve) == reserve.address
+        )
+        if deposited <= 0:
+            raise ValueError(
+                f"Obligation holds no collateral in Solend reserve "
+                f"{reserve.address}: nothing to withdraw"
+            )
+        return deposited
 
     async def build_borrow_transaction(
         self,
@@ -1469,9 +1697,11 @@ class Solend:
 
         Uses ``BorrowObligationLiquidity``. Solend only supports variable-rate
         borrowing; ``interest_rate_mode`` is accepted for contract
-        compatibility and ignored. On-chain execution requires refreshed
-        reserve/obligation instructions in the same transaction, which are not
-        built here.
+        compatibility and ignored.
+
+        The instruction sequence is ``RefreshReserve`` for every reserve of the
+        obligation (plus the borrow reserve), then ``RefreshObligation``, then
+        the borrow itself: the program rejects stale reserves/obligations.
 
         Args:
             asset: The asset to borrow
@@ -1482,15 +1712,22 @@ class Solend:
 
         Returns:
             SolanaTransaction: The unsigned, trackable transaction
+
+        Raises:
+            ValueError: If the user has no obligation account
         """
         await self._ensure_program()
         reserve = self.reserve_configuration_for_asset(asset)
         raw_amount = self._raw_amount(asset, amount)
         user = SolanaAddress.from_string(user_address)
+        obligation = await self.require_obligation_state(user)
 
-        instruction = self.build_borrow_instruction(reserve, user, raw_amount)
-        return await self._wrap_instruction(
-            instruction,
+        instructions = self.build_obligation_refresh_instructions(
+            user, obligation, reserve
+        )
+        instructions.append(self.build_borrow_instruction(reserve, user, raw_amount))
+        return await self._wrap_instructions(
+            instructions,
             user,
             client_operation_id or self._operation_id("borrow", reserve.liquidity_mint),
         )
@@ -1512,6 +1749,10 @@ class Solend:
         full outstanding debt. ``interest_rate_mode`` is ignored (variable
         only).
 
+        The repay instruction only reads the repay reserve (it does not
+        recompute obligation values), so the transaction is a single
+        ``RefreshReserve`` for that reserve followed by the repay.
+
         Args:
             asset: The asset to repay
             amount: The amount to repay, in decimal token units (ignored when
@@ -1529,9 +1770,12 @@ class Solend:
         raw_amount = U64_MAX if repay_all else self._raw_amount(asset, amount)
         user = SolanaAddress.from_string(user_address)
 
-        instruction = self.build_repay_instruction(reserve, user, raw_amount)
-        return await self._wrap_instruction(
-            instruction,
+        instructions = [
+            self.build_refresh_reserve_instruction(reserve),
+            self.build_repay_instruction(reserve, user, raw_amount),
+        ]
+        return await self._wrap_instructions(
+            instructions,
             user,
             client_operation_id or self._operation_id("repay", reserve.liquidity_mint),
         )

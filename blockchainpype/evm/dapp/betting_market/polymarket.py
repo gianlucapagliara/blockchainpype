@@ -33,7 +33,6 @@ import aiohttp
 from financepype.operations.transactions.models import BlockchainTransactionState
 from financepype.owners.wallet import BlockchainWallet
 from pydantic import model_validator
-from web3.types import TxParams
 
 from blockchainpype.dapps.betting_market import (
     BettingMarketConfiguration,
@@ -48,6 +47,7 @@ from blockchainpype.dapps.betting_market import (
 from blockchainpype.dapps.betting_market.betting_market import BettingMarket
 from blockchainpype.evm.asset import EthereumAssetData
 from blockchainpype.evm.blockchain.blockchain import EthereumBlockchain
+from blockchainpype.evm.blockchain.gas import GasConfiguration
 from blockchainpype.evm.blockchain.identifier import EthereumAddress
 from blockchainpype.evm.dapp.abi import EthereumLocalFileABI
 from blockchainpype.evm.dapp.betting_market.clob import (
@@ -72,6 +72,8 @@ from blockchainpype.evm.dapp.erc20 import (
     ERC20ContractConfiguration,
     ERC20Token,
 )
+from blockchainpype.evm.dapp.gas import GasPriceCappedConfiguration
+from blockchainpype.evm.dapp.unsigned import build_unsigned_transaction
 from blockchainpype.evm.transaction import EthereumTransaction
 from blockchainpype.evm.wallet.wallet import EthereumWallet
 
@@ -81,6 +83,13 @@ POLYGON_CHAIN_ID: Final[int] = 137
 CONDITIONAL_TOKENS_ADDRESS: Final[str] = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 USDC_ADDRESS: Final[str] = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
 CTF_EXCHANGE_ADDRESS: Final[str] = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
+
+#: The NegRisk CTF Exchange: neg-risk markets (multi-outcome events where the
+#: outcomes are mutually exclusive) settle on their own exchange, so their
+#: orders must be EIP-712-signed against this verifying contract instead of
+#: :data:`CTF_EXCHANGE_ADDRESS`.
+NEG_RISK_CTF_EXCHANGE_ADDRESS: Final[str] = "0xC5d563A36AE78145C45a50134d48A1215220f80a"
+NEG_RISK_ADAPTER_ADDRESS: Final[str] = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"
 USDC_DECIMALS: Final[int] = 6
 
 #: Index sets redeemed for a binary market: 0b01 (first slot) and 0b10
@@ -107,8 +116,10 @@ class PolymarketConfiguration(ProtocolConfiguration):
         data_api_url: Data API base (user positions)
         conditional_tokens_address: Gnosis ConditionalTokens (ERC-1155)
         collateral_token_address: USDC on Polygon
-        ctf_exchange_address: CTF Exchange (EIP-712 verifying contract)
-        neg_risk_ctf_exchange_address: Neg-risk exchange (reserved, unused)
+        ctf_exchange_address: CTF Exchange (EIP-712 verifying contract for
+            regular markets)
+        neg_risk_ctf_exchange_address: NegRisk CTF Exchange (EIP-712 verifying
+            contract for markets flagged ``neg_risk``)
         neg_risk_adapter_address: Neg-risk adapter (reserved, unused)
         credentials: Optional L2 API credentials; without them all read
             endpoints still work but orders cannot be posted
@@ -123,8 +134,8 @@ class PolymarketConfiguration(ProtocolConfiguration):
     conditional_tokens_address: str = CONDITIONAL_TOKENS_ADDRESS
     collateral_token_address: str = USDC_ADDRESS
     ctf_exchange_address: str = CTF_EXCHANGE_ADDRESS
-    neg_risk_ctf_exchange_address: str = "0xC5d563A36AE78145C45a50134d48A1215220f80a"
-    neg_risk_adapter_address: str = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"
+    neg_risk_ctf_exchange_address: str = NEG_RISK_CTF_EXCHANGE_ADDRESS
+    neg_risk_adapter_address: str = NEG_RISK_ADAPTER_ADDRESS
     credentials: ClobCredentials | None = None
     signature_type: SignatureType = SignatureType.EOA
     default_tick_size: Decimal = Decimal("0.001")
@@ -214,7 +225,12 @@ class Polymarket(ProtocolImplementation):
       (the maximum fee rate the maker accepts).
     * ``BettingMarketConfiguration.max_gas_price_gwei`` (forwarded by the
       facade as ``max_gas_price_gwei``) caps the gas-fee fields of every
-      transaction this strategy builds.
+      transaction this strategy builds, including the ERC-20 approvals it
+      delegates to :class:`ERC20Contract`.
+    * ``PolymarketConfiguration.neg_risk_ctf_exchange_address`` is used as the
+      EIP-712 verifying contract for markets flagged ``neg_risk``; regular
+      markets keep ``ctf_exchange_address``. The flag is read from the CLOB
+      market payload and cached per condition id.
     """
 
     def __init__(
@@ -263,6 +279,9 @@ class Polymarket(ProtocolImplementation):
             )
         )
         self._collateral_token: ERC20Token | None = None
+        #: Neg-risk flag per condition id, filled in by the market parsers and
+        #: by :meth:`_resolve_neg_risk` so order building does not re-fetch.
+        self._neg_risk_by_market: dict[str, bool] = {}
 
         self.conditional_tokens_contract = BlockchainBoundContract(
             EthereumContractConfiguration(
@@ -541,6 +560,44 @@ class Polymarket(ProtocolImplementation):
 
     # === Order building / posting (off-chain write path) ===
 
+    def verifying_contract(self, neg_risk: bool) -> str:
+        """The EIP-712 verifying contract for a market's orders.
+
+        Neg-risk markets settle on the NegRisk CTF Exchange, so their orders
+        must be signed against that contract; every other market uses the
+        regular CTF Exchange. Signing against the wrong one produces a
+        signature the exchange rejects.
+
+        Args:
+            neg_risk: Whether the market is a neg-risk market
+
+        Returns:
+            str: The configured exchange address to use as
+            ``verifyingContract``
+        """
+        if neg_risk:
+            return self.configuration.neg_risk_ctf_exchange_address
+        return self.configuration.ctf_exchange_address
+
+    async def _resolve_neg_risk(self, market_id: str) -> bool:
+        """Resolve a market's neg-risk flag, fetching the market if needed.
+
+        The flag is cached per condition id: markets already parsed through
+        :meth:`get_market`/:meth:`get_markets` need no extra request.
+
+        Args:
+            market_id: The market's condition id
+
+        Returns:
+            bool: True when the market trades on the NegRisk CTF Exchange
+        """
+        cached = self._neg_risk_by_market.get(market_id)
+        if cached is not None:
+            return cached
+        # Parsing caches the flag as a side effect.
+        self._parse_clob_market(await self._clob.get_market(market_id))
+        return self._neg_risk_by_market.get(market_id, False)
+
     def build_order(
         self,
         outcome_token_id: str,
@@ -551,6 +608,7 @@ class Polymarket(ProtocolImplementation):
         nonce: int = 0,
         salt: int | None = None,
         tick_size: Decimal | None = None,
+        neg_risk: bool = False,
     ) -> SignedClobOrder:
         """Build and EIP-712-sign a CLOB order with the bound wallet.
 
@@ -563,6 +621,9 @@ class Polymarket(ProtocolImplementation):
             nonce: Maker's exchange nonce
             salt: Explicit salt (random when omitted)
             tick_size: Market price tick; configuration default when omitted
+            neg_risk: Whether the outcome token belongs to a neg-risk market;
+                selects the EIP-712 verifying contract (see
+                :meth:`verifying_contract`)
 
         Returns:
             The signed order, ready to be posted to the CLOB
@@ -604,7 +665,7 @@ class Polymarket(ProtocolImplementation):
             order,
             chain_id=self._order_chain_id,
             private_key=bytes(signer.key),
-            verifying_contract=self.configuration.ctf_exchange_address,
+            verifying_contract=self.verifying_contract(neg_risk),
         )
 
     async def place_buy(
@@ -613,13 +674,18 @@ class Polymarket(ProtocolImplementation):
         price: Decimal,
         size: Decimal,
         order_type: str | None = None,
+        neg_risk: bool = False,
     ) -> OrderPostResponse:
         """Sign a BUY order and post it to the CLOB.
 
         Requires a bound wallet (for signing) and configured
         :class:`ClobCredentials` (for the authenticated ``POST /order``).
+        ``neg_risk`` selects the EIP-712 verifying contract; use
+        :meth:`build_buy_transaction` to have it resolved from the market.
         """
-        signed_order = self.build_order(outcome_token_id, OrderSide.BUY, price, size)
+        signed_order = self.build_order(
+            outcome_token_id, OrderSide.BUY, price, size, neg_risk=neg_risk
+        )
         return await self._clob.post_order(
             signed_order,
             order_type=order_type or self.configuration.default_order_type,
@@ -631,9 +697,16 @@ class Polymarket(ProtocolImplementation):
         price: Decimal,
         size: Decimal,
         order_type: str | None = None,
+        neg_risk: bool = False,
     ) -> OrderPostResponse:
-        """Sign a SELL order and post it to the CLOB."""
-        signed_order = self.build_order(outcome_token_id, OrderSide.SELL, price, size)
+        """Sign a SELL order and post it to the CLOB.
+
+        ``neg_risk`` selects the EIP-712 verifying contract; use
+        :meth:`build_sell_transaction` to have it resolved from the market.
+        """
+        signed_order = self.build_order(
+            outcome_token_id, OrderSide.SELL, price, size, neg_risk=neg_risk
+        )
         return await self._clob.post_order(
             signed_order,
             order_type=order_type or self.configuration.default_order_type,
@@ -653,13 +726,15 @@ class Polymarket(ProtocolImplementation):
         signed_order: SignedClobOrder,
         market_id: str,
         client_operation_id: str,
+        neg_risk: bool,
     ) -> EthereumTransaction:
         """Wrap a signed CLOB order into a tracking :class:`EthereumTransaction`.
 
         The result is NOT an on-chain transaction: it stays unsigned (as a
         chain transaction) in ``PENDING_BROADCAST`` state and carries the
-        signed order payload in ``other_data["clob_order"]``. "Broadcasting"
-        it means posting the order via :meth:`post_order` /
+        signed order payload in ``other_data["clob_order"]``, together with
+        the market id and the ``neg_risk`` flag the order was signed for.
+        "Broadcasting" it means posting the order via :meth:`post_order` /
         :meth:`ClobClient.post_order`.
         """
         wallet = self._require_wallet()
@@ -672,6 +747,7 @@ class Polymarket(ProtocolImplementation):
             other_data={
                 "clob_order": signed_order.to_api_payload(),
                 "market_id": market_id,
+                "neg_risk": neg_risk,
             },
         )
 
@@ -683,6 +759,7 @@ class Polymarket(ProtocolImplementation):
         max_price: Decimal,
         user_address: str,
         client_operation_id: str | None = None,
+        neg_risk: bool | None = None,
     ) -> EthereumTransaction:
         """Build (without posting) a signed CLOB BUY order for the facade.
 
@@ -700,6 +777,9 @@ class Polymarket(ProtocolImplementation):
             max_price: Maximum acceptable price per share
             user_address: Must match the bound wallet's address
             client_operation_id: Optional tracking id, generated when omitted
+            neg_risk: Whether to sign against the NegRisk CTF Exchange; when
+                omitted the flag is resolved from the market (cached, see
+                :meth:`verifying_contract`)
 
         Raises:
             ValueError: If no wallet is bound or ``user_address`` mismatches
@@ -708,14 +788,20 @@ class Polymarket(ProtocolImplementation):
         self._require_wallet_address_match(user_address, wallet)
         if max_price <= 0:
             raise ValueError(f"max_price must be positive, got {max_price}")
+        if neg_risk is None:
+            neg_risk = await self._resolve_neg_risk(market_id)
 
         signed_order = self.build_order(
-            outcome_token_id, OrderSide.BUY, price=max_price, size=amount / max_price
+            outcome_token_id,
+            OrderSide.BUY,
+            price=max_price,
+            size=amount / max_price,
+            neg_risk=neg_risk,
         )
         if client_operation_id is None:
             client_operation_id = f"polymarket_buy_{uuid.uuid4().hex[:12]}"
         return self._wrap_order_in_transaction(
-            signed_order, market_id, client_operation_id
+            signed_order, market_id, client_operation_id, neg_risk
         )
 
     async def build_sell_transaction(
@@ -726,41 +812,52 @@ class Polymarket(ProtocolImplementation):
         min_price: Decimal,
         user_address: str,
         client_operation_id: str | None = None,
+        neg_risk: bool | None = None,
     ) -> EthereumTransaction:
         """Build (without posting) a signed CLOB SELL order for the facade.
 
         As with buys, the returned object wraps an off-chain CLOB order (see
         :meth:`build_buy_transaction`); it sells ``shares`` outcome tokens at
-        limit price ``min_price``.
+        limit price ``min_price``. ``neg_risk`` selects the EIP-712 verifying
+        contract and is resolved from the market when omitted.
 
         Raises:
             ValueError: If no wallet is bound or ``user_address`` mismatches
         """
         wallet = self._require_wallet()
         self._require_wallet_address_match(user_address, wallet)
+        if neg_risk is None:
+            neg_risk = await self._resolve_neg_risk(market_id)
 
         signed_order = self.build_order(
-            outcome_token_id, OrderSide.SELL, price=min_price, size=shares
+            outcome_token_id,
+            OrderSide.SELL,
+            price=min_price,
+            size=shares,
+            neg_risk=neg_risk,
         )
         if client_operation_id is None:
             client_operation_id = f"polymarket_sell_{uuid.uuid4().hex[:12]}"
         return self._wrap_order_in_transaction(
-            signed_order, market_id, client_operation_id
+            signed_order, market_id, client_operation_id, neg_risk
         )
 
     # === On-chain write path ===
 
-    def _apply_gas_cap(self, tx_data: TxParams) -> TxParams:
-        """Cap the gas-fee fields at the configured ``max_gas_price_gwei``."""
+    def _gas_configuration(self, wallet: EthereumWallet) -> GasConfiguration | None:
+        """Gas settings enforcing the configured ``max_gas_price_gwei``.
+
+        Returns the wallet's own configuration wrapped in a
+        :class:`~blockchainpype.evm.dapp.gas.GasPriceCappedConfiguration`, so
+        the cap applies wherever the settings are threaded — including the
+        ERC-20 ``place_*`` helpers used for approvals. ``None`` (meaning "use
+        the wallet's configuration unchanged") when no cap is configured.
+        """
         if self._max_gas_price_gwei is None:
-            return tx_data
-        cap = self._max_gas_price_gwei * 10**9
-        capped = dict(tx_data)
-        for key in ("gasPrice", "maxFeePerGas", "maxPriorityFeePerGas"):
-            value = capped.get(key)
-            if isinstance(value, int) and value > cap:
-                capped[key] = cap
-        return cast(TxParams, capped)
+            return None
+        return GasPriceCappedConfiguration.from_configuration(
+            wallet.gas_configuration, self._max_gas_price_gwei
+        )
 
     @staticmethod
     def _parse_condition_id(market_id: str) -> bytes:
@@ -798,7 +895,9 @@ class Polymarket(ProtocolImplementation):
         wallet (sender, chain id, calldata, gas fees — capped at the
         configured ``max_gas_price_gwei``) and returned unsigned in
         ``PENDING_BROADCAST`` state with the parameters in
-        ``other_data["tx_data"]``.
+        ``other_data[UNSIGNED_TX_DATA_KEY]`` (see
+        :mod:`blockchainpype.evm.dapp.unsigned`) and the market id alongside
+        them, as the built buy/sell orders also carry it.
 
         Args:
             market_id: The market's condition id (0x-prefixed 32-byte hex)
@@ -824,19 +923,17 @@ class Polymarket(ProtocolImplementation):
             condition_id,
             list(BINARY_INDEX_SETS),
         )
-        tx_params = self._apply_gas_cap(
-            await wallet.build_transaction(function=function)
+        tx_params = await wallet.build_transaction(
+            function=function, gas_configuration=self._gas_configuration(wallet)
         )
 
         if client_operation_id is None:
             client_operation_id = f"polymarket_redeem_{uuid.uuid4().hex[:12]}"
-        return EthereumTransaction(
-            client_operation_id=client_operation_id,
-            owner_identifier=wallet.identifier,
-            creation_timestamp=wallet.current_timestamp,
-            current_state=BlockchainTransactionState.PENDING_BROADCAST,
-            signed_transaction=None,
-            other_data={"tx_data": dict(tx_params)},
+        return build_unsigned_transaction(
+            client_operation_id,
+            wallet,
+            tx_params,
+            extra_data={"market_id": market_id},
         )
 
     async def approve_collateral(
@@ -849,7 +946,10 @@ class Polymarket(ProtocolImplementation):
         """Approve the CTF Exchange to spend USDC (signs and broadcasts).
 
         Delegates to :meth:`ERC20Contract.place_approve` on the collateral
-        token with an explicit wallet, per the ERC-20 helper pattern.
+        token with an explicit wallet, per the ERC-20 helper pattern, and
+        threads the configured ``max_gas_price_gwei`` cap through as the gas
+        configuration so approvals honour it like every other transaction this
+        strategy builds.
 
         Args:
             amount: Decimal-adjusted USDC amount to approve
@@ -866,6 +966,7 @@ class Polymarket(ProtocolImplementation):
             spender_address,
             amount,
             client_operation_id=client_operation_id,
+            gas_configuration=self._gas_configuration(ethereum_wallet),
         )
 
     async def place_conditional_tokens_approval(
@@ -899,8 +1000,9 @@ class Polymarket(ProtocolImplementation):
         function = self.conditional_tokens_contract.functions.setApprovalForAll(
             operator_address.raw, approved
         )
-        tx_data = self._apply_gas_cap(
-            await ethereum_wallet.build_transaction(function=function)
+        tx_data = await ethereum_wallet.build_transaction(
+            function=function,
+            gas_configuration=self._gas_configuration(ethereum_wallet),
         )
 
         if ethereum_wallet.last_nonce is None:
@@ -962,9 +1064,18 @@ class Polymarket(ProtocolImplementation):
         creation_date: datetime,
         end_date: datetime | None,
         resolved_outcome_id: str | None,
+        neg_risk: bool,
         raw: dict[str, Any],
     ) -> BettingMarketModel:
-        """Assemble a :class:`BettingMarketModel` with shared invariants."""
+        """Assemble a :class:`BettingMarketModel` with shared invariants.
+
+        The Polymarket-specific ``neg_risk`` flag travels in the model's
+        ``metadata`` (the shared model has no protocol-specific fields) and is
+        cached per condition id so order building can pick the right EIP-712
+        verifying contract without re-fetching the market.
+        """
+        if market_id:
+            self._neg_risk_by_market[market_id] = neg_risk
         return BettingMarketModel(
             market_id=market_id,
             title=title,
@@ -979,7 +1090,11 @@ class Polymarket(ProtocolImplementation):
             end_date=end_date,
             resolved_outcome_id=resolved_outcome_id,
             protocol=self.configuration.protocol_name,
-            metadata={"parser_version": MARKET_PARSER_VERSION, "raw": raw},
+            metadata={
+                "parser_version": MARKET_PARSER_VERSION,
+                "neg_risk": neg_risk,
+                "raw": raw,
+            },
         )
 
     def _parse_clob_market(self, market_data: dict[str, Any]) -> BettingMarketModel:
@@ -992,6 +1107,7 @@ class Polymarket(ProtocolImplementation):
               "active": true, "closed": false, "archived": false,
               "end_date_iso": "2025-12-31T00:00:00Z",
               "accepting_order_timestamp": "2025-01-01T00:00:00Z" | null,
+              "neg_risk": false,
               "tags": ["Crypto", ...],
               "tokens": [
                 {"token_id": "713...", "outcome": "Yes",
@@ -1003,7 +1119,8 @@ class Polymarket(ProtocolImplementation):
         Status precedence: a market with a winning token is RESOLVED even
         when also flagged closed; otherwise closed/inactive markets are
         CLOSED. The payload carries no volume/liquidity or creation date
-        (zeros / epoch are used).
+        (zeros / epoch are used). ``neg_risk`` selects the exchange orders for
+        this market must be signed against (see :meth:`verifying_contract`).
         """
         outcomes: list[MarketOutcome] = []
         winner_outcome_id: str | None = None
@@ -1060,6 +1177,7 @@ class Polymarket(ProtocolImplementation):
             or _EPOCH,
             end_date=self._parse_datetime(market_data.get("end_date_iso")),
             resolved_outcome_id=winner_outcome_id,
+            neg_risk=bool(market_data.get("neg_risk", False)),
             raw=market_data,
         )
 
@@ -1077,7 +1195,7 @@ class Polymarket(ProtocolImplementation):
               "volumeNum": 1091701.53, "liquidityNum": 302845.92,
               "createdAt": "2025-01-04T22:58:00.169Z",
               "endDate": "2025-12-31T12:00:00Z",
-              "active": true, "closed": false,
+              "active": true, "closed": false, "negRisk": false,
               "umaResolutionStatus": "resolved" | ...
             }
 
@@ -1163,6 +1281,7 @@ class Polymarket(ProtocolImplementation):
             or _EPOCH,
             end_date=self._parse_datetime(market_data.get("endDate")),
             resolved_outcome_id=winner_outcome_id,
+            neg_risk=bool(market_data.get("negRisk", False)),
             raw=market_data,
         )
 
@@ -1223,14 +1342,25 @@ class EVMBettingMarket(BettingMarket):
                 )
 
     def set_wallet(self, wallet: BlockchainWallet | None) -> None:
-        """Bind (or unbind) the wallet on every protocol strategy."""
+        """Bind (or unbind) the wallet on every protocol strategy.
+
+        ``set_wallet`` is part of the betting-market
+        :class:`~blockchainpype.dapps.betting_market.ProtocolImplementation`
+        contract, so every registered strategy is called directly.
+        """
         for strategy in self._protocol_strategies.values():
-            cast(Polymarket, strategy).set_wallet(wallet)
+            strategy.set_wallet(wallet)
 
     async def close(self) -> None:
-        """Close the HTTP resources of every protocol strategy."""
+        """Close the HTTP resources of every protocol strategy.
+
+        ``close`` is Polymarket-specific (it releases the CLOB/Gamma HTTP
+        sessions) rather than part of the shared protocol contract, so only
+        :class:`Polymarket` strategies are closed.
+        """
         for strategy in self._protocol_strategies.values():
-            await cast(Polymarket, strategy).close()
+            if isinstance(strategy, Polymarket):
+                await strategy.close()
 
 
 class PolymarketBettingMarket(EVMBettingMarket):

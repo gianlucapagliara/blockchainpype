@@ -22,7 +22,6 @@ from decimal import Decimal
 from typing import Any, cast
 
 from financepype.assets.blockchain import BlockchainAsset
-from financepype.operations.transactions.models import BlockchainTransactionState
 from financepype.owners.wallet import BlockchainWallet
 from web3.types import TxParams
 
@@ -40,6 +39,7 @@ from blockchainpype.evm.dapp.uniswap.v2 import (
     asset_symbol,
     ensure_asset_data,
 )
+from blockchainpype.evm.dapp.unsigned import build_unsigned_transaction
 from blockchainpype.evm.transaction import EthereumTransaction
 from blockchainpype.evm.wallet.wallet import EthereumWallet
 
@@ -641,7 +641,8 @@ class UniswapV3(ProtocolImplementation):
         ``build_transaction`` (sender, chain id, calldata, gas fees) and the
         returned :class:`EthereumTransaction` tracking object stays unsigned
         in ``PENDING_BROADCAST`` state; the built parameters are carried in
-        ``other_data["tx_data"]``.
+        ``other_data[UNSIGNED_TX_DATA_KEY]`` (see
+        :mod:`blockchainpype.evm.dapp.unsigned`).
 
         Args:
             route: The quoted route to execute
@@ -658,14 +659,7 @@ class UniswapV3(ProtocolImplementation):
         tx_params = await self._build_swap_tx_params(route, recipient, deadline_minutes)
         if client_operation_id is None:
             client_operation_id = self._generate_client_operation_id(route)
-        return EthereumTransaction(
-            client_operation_id=client_operation_id,
-            owner_identifier=wallet.identifier,
-            creation_timestamp=wallet.current_timestamp,
-            current_state=BlockchainTransactionState.PENDING_BROADCAST,
-            signed_transaction=None,
-            other_data={"tx_data": dict(tx_params)},
-        )
+        return build_unsigned_transaction(client_operation_id, wallet, tx_params)
 
     async def create_swap_transaction(
         self,

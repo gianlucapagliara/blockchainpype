@@ -37,6 +37,10 @@ from blockchainpype.evm.dapp.erc20 import (
     ERC20ContractConfiguration,
     ERC20Token,
 )
+from blockchainpype.evm.dapp.gas import (
+    GasPriceCappedConfiguration,
+    cap_gas_price_fields,
+)
 from blockchainpype.evm.transaction import EthereumTransaction
 from blockchainpype.evm.wallet.wallet import EthereumWallet
 from tests.evm.test_wallet import (
@@ -383,6 +387,120 @@ async def test_place_transfer_from_builds_exact_calldata(
     raw_tx_hex = rpc_provider.calls_for("eth_sendRawTransaction")[0][0]
     decoded = TypedTransaction.from_bytes(HexBytes(raw_tx_hex)).as_dict()
     assert HexBytes(decoded["data"]).to_0x_hex() == expected_data
+
+
+# === Gas configuration hook ===
+
+
+async def test_default_fees_come_from_the_wallet_configuration(
+    erc20_contract: ERC20Contract,
+    ethereum_wallet: EthereumWallet,
+    rpc_provider: FakeRPCProvider,
+) -> None:
+    """Baseline: without an override the wallet's own settings apply."""
+    spender = EthereumAddress.from_string(SPENDER)
+
+    await erc20_contract.place_approve(ethereum_wallet, spender, Decimal("1"))
+    await drain_background_tasks(ethereum_wallet)
+
+    raw_tx_hex = rpc_provider.calls_for("eth_sendRawTransaction")[0][0]
+    decoded = TypedTransaction.from_bytes(HexBytes(raw_tx_hex)).as_dict()
+    assert decoded["maxFeePerGas"] == 21_000_000_000  # 2 * 10 gwei base + 1 gwei tip
+    assert decoded["maxPriorityFeePerGas"] == 1_000_000_000
+    assert decoded["gas"] == 65000  # ceil(50,000 estimate * 1.3)
+
+
+@pytest.mark.parametrize(
+    "place",
+    ["approve", "transfer", "transfer_from"],
+)
+async def test_place_methods_accept_a_gas_configuration(
+    erc20_contract: ERC20Contract,
+    ethereum_wallet: EthereumWallet,
+    rpc_provider: FakeRPCProvider,
+    place: str,
+) -> None:
+    """A caller-supplied gas configuration must reach wallet.build_transaction."""
+    capped = GasPriceCappedConfiguration.from_configuration(
+        ethereum_wallet.gas_configuration, max_gas_price_gwei=5
+    )
+    address = EthereumAddress.from_string(SPENDER)
+    recipient = EthereumAddress.from_string(RECIPIENT)
+
+    if place == "approve":
+        await erc20_contract.place_approve(
+            ethereum_wallet, address, Decimal("1"), gas_configuration=capped
+        )
+    elif place == "transfer":
+        await erc20_contract.place_transfer(
+            ethereum_wallet, recipient, Decimal("1"), gas_configuration=capped
+        )
+    else:
+        await erc20_contract.place_transfer_from(
+            ethereum_wallet,
+            recipient,
+            address,
+            Decimal("1"),
+            gas_configuration=capped,
+        )
+    await drain_background_tasks(ethereum_wallet)
+
+    raw_tx_hex = rpc_provider.calls_for("eth_sendRawTransaction")[0][0]
+    decoded = TypedTransaction.from_bytes(HexBytes(raw_tx_hex)).as_dict()
+    # Uncapped the max fee would be 21 gwei (see the baseline above)
+    assert decoded["maxFeePerGas"] == 5_000_000_000
+    assert decoded["maxPriorityFeePerGas"] == 1_000_000_000
+    # Only the fee fields are capped; the gas limit is untouched
+    assert decoded["gas"] == 65000
+
+
+async def test_gas_cap_clamps_the_priority_fee_too(
+    erc20_contract: ERC20Contract,
+    ethereum_wallet: EthereumWallet,
+    rpc_provider: FakeRPCProvider,
+) -> None:
+    """A cap below the tip clamps both fields, keeping tip <= max fee."""
+    spender = EthereumAddress.from_string(SPENDER)
+    capped = GasPriceCappedConfiguration.from_configuration(
+        ethereum_wallet.gas_configuration, max_gas_price_gwei=1
+    )
+
+    await erc20_contract.place_approve(
+        ethereum_wallet, spender, Decimal("1"), gas_configuration=capped
+    )
+    await drain_background_tasks(ethereum_wallet)
+
+    raw_tx_hex = rpc_provider.calls_for("eth_sendRawTransaction")[0][0]
+    decoded = TypedTransaction.from_bytes(HexBytes(raw_tx_hex)).as_dict()
+    assert decoded["maxFeePerGas"] == 1_000_000_000
+    assert decoded["maxPriorityFeePerGas"] == 1_000_000_000
+
+
+def test_cap_gas_price_fields_leaves_other_entries_alone() -> None:
+    capped = cap_gas_price_fields(
+        {
+            "gas": 65000,
+            "gasPrice": 30_000_000_000,
+            "maxFeePerGas": 21_000_000_000,
+            "maxPriorityFeePerGas": 500_000_000,
+            "to": TOKEN_ADDRESS,
+        },
+        max_gas_price_gwei=10,
+    )
+    assert capped == {
+        "gas": 65000,
+        "gasPrice": 10_000_000_000,
+        "maxFeePerGas": 10_000_000_000,
+        "maxPriorityFeePerGas": 500_000_000,
+        "to": TOKEN_ADDRESS,
+    }
+
+
+def test_cap_gas_price_fields_without_a_cap_is_a_copy() -> None:
+    values = {"maxFeePerGas": 21_000_000_000}
+    capped = cap_gas_price_fields(values, max_gas_price_gwei=None)
+    assert capped == values
+    assert capped is not values
 
 
 async def test_place_transfer_generates_operation_id(

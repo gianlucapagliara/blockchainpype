@@ -21,7 +21,7 @@ Covered:
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
@@ -36,6 +36,9 @@ from blockchainpype.dapps.money_market import (
     CollateralMode,
     InterestRateMode,
     ProtocolConfiguration,
+)
+from blockchainpype.dapps.money_market import (
+    ProtocolImplementation as MoneyMarketProtocolImplementation,
 )
 from blockchainpype.evm.asset import EthereumAssetData
 from blockchainpype.evm.blockchain.blockchain import (
@@ -63,6 +66,11 @@ from blockchainpype.evm.dapp.money_market.aave import (
     bps_to_decimal,
     ray_to_decimal,
     wad_to_decimal,
+)
+from blockchainpype.evm.dapp.unsigned import (
+    UNSIGNED_TX_DATA_KEY,
+    build_unsigned_transaction,
+    unsigned_tx_params,
 )
 from blockchainpype.evm.transaction import EthereumTransaction
 from blockchainpype.evm.wallet.wallet import EthereumWallet
@@ -436,7 +444,8 @@ def bound_money_market(
 
 
 def tx_params_of(transaction: EthereumTransaction) -> dict[str, Any]:
-    return dict(transaction.other_data["tx_params"])
+    """Read the built parameters through the shared unsigned-tx convention."""
+    return dict(unsigned_tx_params(transaction))
 
 
 def calldata_of(transaction: EthereumTransaction) -> str:
@@ -836,6 +845,84 @@ class TestBuildTransactions:
         )
 
 
+# === Unsigned-transaction carrier convention ===
+
+
+class TestUnsignedCarrier:
+    """Built parameters travel under the shared ``tx_data`` key."""
+
+    async def test_carrier_key_is_the_shared_constant(
+        self, bound_strategy: AaveV3, usdc: ERC20Token
+    ) -> None:
+        transaction = await bound_strategy.build_supply_transaction(
+            usdc, Decimal("1"), USER_ADDRESS
+        )
+
+        assert UNSIGNED_TX_DATA_KEY == "tx_data"
+        assert set(transaction.other_data) == {UNSIGNED_TX_DATA_KEY}
+        # The old Aave-only "tx_params" key is gone
+        assert "tx_params" not in transaction.other_data
+
+        params = unsigned_tx_params(transaction)
+        assert params["from"] == bound_strategy._require_wallet().address.raw
+        assert str(params["data"]).lower().startswith(SEL_SUPPLY)
+
+    async def test_reading_a_foreign_transaction_raises(
+        self, ethereum_wallet: EthereumWallet
+    ) -> None:
+        transaction = EthereumTransaction(
+            client_operation_id="not-a-dapp-build",
+            owner_identifier=ethereum_wallet.identifier,
+            creation_timestamp=ethereum_wallet.current_timestamp,
+        )
+        with pytest.raises(ValueError, match="carries no 'tx_data' entry"):
+            unsigned_tx_params(transaction)
+
+    def test_extra_data_travels_alongside_the_parameters(
+        self, ethereum_wallet: EthereumWallet
+    ) -> None:
+        params: Any = {"to": POOL_ADDRESS, "chainId": 1}
+        transaction = build_unsigned_transaction(
+            "op-1", ethereum_wallet, params, extra_data={"market_id": "m-1"}
+        )
+
+        assert transaction.other_data["market_id"] == "m-1"
+        assert unsigned_tx_params(transaction) == params
+        assert transaction.current_state == BlockchainTransactionState.PENDING_BROADCAST
+        # The stored copy is detached from the caller's mapping
+        params["to"] = DATA_PROVIDER_ADDRESS
+        assert unsigned_tx_params(transaction)["to"] == POOL_ADDRESS
+
+    def test_extra_data_cannot_shadow_the_carrier_key(
+        self, ethereum_wallet: EthereumWallet
+    ) -> None:
+        with pytest.raises(ValueError, match="must not override the reserved"):
+            build_unsigned_transaction(
+                "op-2",
+                ethereum_wallet,
+                cast(Any, {}),
+                extra_data={UNSIGNED_TX_DATA_KEY: {"to": POOL_ADDRESS}},
+            )
+
+
+# === Protocol contract conformance ===
+
+
+class TestProtocolConformance:
+    """AaveV3 fulfils the runtime-checkable money-market protocol."""
+
+    def test_strategy_conforms(self, aave_strategy: AaveV3) -> None:
+        assert isinstance(aave_strategy, MoneyMarketProtocolImplementation)
+
+    def test_registered_strategies_conform(
+        self, money_market: AaveV3MoneyMarket
+    ) -> None:
+        strategies = list(money_market._protocol_strategies.values())
+        assert strategies
+        for strategy in strategies:
+            assert isinstance(strategy, MoneyMarketProtocolImplementation)
+
+
 # === Wallet binding ===
 
 
@@ -989,6 +1076,35 @@ class TestMoneyMarketFacade:
             SEL_BORROW,
             ["address", "uint256", "uint256", "uint16", "address"],
             [WETH_ADDRESS, 750_000_000_000_000_000, 2, 0, USER_ADDRESS],
+        )
+
+    async def test_withdraw_dispatch(
+        self, bound_money_market: AaveV3MoneyMarket, usdc: ERC20Token
+    ) -> None:
+        transaction = await bound_money_market.withdraw(
+            usdc, Decimal("50"), USER_ADDRESS
+        )
+
+        assert isinstance(transaction, EthereumTransaction)
+        assert calldata_of(transaction) == encode_call(
+            SEL_WITHDRAW,
+            ["address", "uint256", "address"],
+            [USDC_ADDRESS, 50 * 10**6, USER_ADDRESS],
+        )
+
+    async def test_withdraw_all_dispatch(
+        self, bound_money_market: AaveV3MoneyMarket, usdc: ERC20Token
+    ) -> None:
+        """The facade's withdraw_all must reach the strategy's uint256-max path."""
+        transaction = await bound_money_market.withdraw(
+            usdc, Decimal(0), USER_ADDRESS, withdraw_all=True
+        )
+
+        assert isinstance(transaction, EthereumTransaction)
+        assert calldata_of(transaction) == encode_call(
+            SEL_WITHDRAW,
+            ["address", "uint256", "address"],
+            [USDC_ADDRESS, UINT256_MAX, USER_ADDRESS],
         )
 
     async def test_repay_all_dispatch(
