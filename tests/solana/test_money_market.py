@@ -7,6 +7,10 @@ This module tests:
 - PDA/derived-address helpers (lending market authority, obligation, ATA)
 - Exact instruction encoding (single-byte discriminant + u64 LE amounts) and
   exact AccountMeta lists for the four implemented Solend instructions
+- Obligation/collateral-account bootstrap: the exact encoding of the
+  SystemProgram CreateAccountWithSeed, InitObligation and idempotent-ATA
+  instructions, and the on-chain existence checks that decide whether
+  build_supply_transaction prepends them
 - Build-only transaction construction (unsigned, real blockhash/fee payer)
 - Market data / user account data / positions computed from parsed accounts
 - Facade dispatch through the MoneyMarket base class
@@ -17,12 +21,14 @@ solders response payloads; no network access is performed.
 """
 
 import asyncio
+import struct
 from decimal import Decimal
 
 import pytest
 from financepype.operations.transactions.models import BlockchainTransactionState
 from financepype.operators.blockchains.models import BlockchainPlatform
 from pydantic import SecretStr, ValidationError
+from solders import sysvar
 from solders.account import Account
 from solders.hash import Hash
 from solders.keypair import Keypair
@@ -31,13 +37,19 @@ from solders.rpc.responses import (
     GetAccountInfoResp,
     GetBalanceResp,
     GetLatestBlockhashResp,
+    GetMinimumBalanceForRentExemptionResp,
     RpcBlockhash,
     RpcResponseContext,
     SendTransactionResp,
 )
 from solders.signature import Signature
-from spl.token.constants import TOKEN_PROGRAM_ID
-from spl.token.instructions import get_associated_token_address
+from solders.system_program import ID as SYSTEM_PROGRAM_ID
+from solders.system_program import decode_create_account_with_seed
+from spl.token.constants import ASSOCIATED_TOKEN_PROGRAM_ID, TOKEN_PROGRAM_ID
+from spl.token.instructions import (
+    create_idempotent_associated_token_account,
+    get_associated_token_address,
+)
 
 from blockchainpype.dapps.money_market import (
     CollateralMode,
@@ -64,6 +76,10 @@ from blockchainpype.solana.dapp.money_market import (
     SolendProgram,
     SolendReserveConfiguration,
     SolendReserveState,
+)
+from blockchainpype.solana.dapp.money_market.solend import (
+    OBLIGATION_ACCOUNT_SIZE,
+    OBLIGATION_SEED_LENGTH,
 )
 from blockchainpype.solana.dapp.token import SPLToken
 from blockchainpype.solana.transaction import SolanaTransaction
@@ -387,14 +403,44 @@ def wsol_reserve_bytes(wsol_reserve):
     )
 
 
+# Rent-exempt minimum the mocked node reports for a 1300-byte obligation.
+OBLIGATION_RENT_EXEMPTION = 9_938_880
+
+# SPL token account size; a cToken ATA holding collateral has this layout.
+TOKEN_ACCOUNT_SIZE = 165
+
+
+def build_token_account_bytes(*, mint: Pubkey, owner: Pubkey, amount: int = 0) -> bytes:
+    """Pack an SPL token account at the documented 165-byte offsets.
+
+    Only the fields the existence checks and a realistic response need:
+    mint (0), owner (32), amount (64, u64 LE) and the initialized state byte
+    (108); the COption tags and the remaining fields stay zeroed.
+    """
+    data = bytearray(TOKEN_ACCOUNT_SIZE)
+    data[0:32] = bytes(mint)
+    data[32:64] = bytes(owner)
+    data[64:72] = amount.to_bytes(8, "little")
+    data[108] = 1  # AccountState::Initialized
+    return bytes(data)
+
+
 def make_rpc_client(
     *,
     blockhash: Hash | None = None,
     accounts: dict[Pubkey, bytes] | None = None,
     send_signature: Signature | None = None,
+    rent_exemption: int = OBLIGATION_RENT_EXEMPTION,
 ):
     """Build a mock rpc_client answering at the RPC boundary with realistic
-    solders response payloads."""
+    solders response payloads.
+
+    Accounts absent from ``accounts`` are reported as nonexistent (a null
+    ``value``), which is exactly how a node answers for a wallet that has
+    never created its obligation or collateral token account. Token-program
+    sized payloads are reported as owned by the SPL token program, everything
+    else by the Solend program.
+    """
     from unittest.mock import AsyncMock, MagicMock
 
     client = MagicMock(name="rpc_client")
@@ -419,7 +465,9 @@ def make_rpc_client(
             else Account(
                 lamports=2_039_280,
                 data=data,
-                owner=Pubkey.from_string(SOLEND_PROGRAM),
+                owner=TOKEN_PROGRAM_ID
+                if len(data) == TOKEN_ACCOUNT_SIZE
+                else Pubkey.from_string(SOLEND_PROGRAM),
                 executable=False,
                 rent_epoch=0,
             )
@@ -427,6 +475,10 @@ def make_rpc_client(
         return GetAccountInfoResp(context=RpcResponseContext(slot=1000), value=value)
 
     client.get_account_info = AsyncMock(side_effect=get_account_info)
+
+    client.get_minimum_balance_for_rent_exemption = AsyncMock(
+        return_value=GetMinimumBalanceForRentExemptionResp(rent_exemption)
+    )
 
     client.get_balance = AsyncMock(
         return_value=GetBalanceResp(
@@ -462,6 +514,17 @@ def compiled_instructions(transaction: SolanaTransaction):
 def compiled_data(transaction: SolanaTransaction) -> list[bytes]:
     """The exact data bytes of every instruction, in order."""
     return [bytes(compiled.data) for compiled in compiled_instructions(transaction)]
+
+
+def compiled_program_ids(transaction: SolanaTransaction) -> list[Pubkey]:
+    """The program each compiled instruction targets, in order."""
+    raw = transaction.raw_transaction
+    assert raw is not None
+    message = raw.message
+    return [
+        message.account_keys[compiled.program_id_index]
+        for compiled in message.instructions
+    ]
 
 
 def compiled_accounts(transaction: SolanaTransaction, index: int) -> list[Pubkey]:
@@ -510,6 +573,34 @@ def obligation_rpc_client(
             Pubkey.from_string(USER_OBLIGATION): obligation_bytes,
             Pubkey.from_string(usdc_reserve.address): usdc_reserve_bytes,
             Pubkey.from_string(wsol_reserve.address): wsol_reserve_bytes,
+        },
+    )
+
+
+@pytest.fixture
+def usdc_collateral_ata(user, usdc_reserve) -> Pubkey:
+    """The user's associated token account for the USDC reserve's cToken."""
+    return ata(user, usdc_reserve.collateral_mint)
+
+
+@pytest.fixture
+def supply_ready_rpc_client(
+    blockhash, obligation_bytes, usdc_reserve, usdc_collateral_ata, user
+):
+    """RPC client for a wallet that already supplied before.
+
+    Both accounts ``build_supply_transaction`` probes exist: the obligation
+    and the collateral (cToken) associated token account.
+    """
+    return make_rpc_client(
+        blockhash=blockhash,
+        accounts={
+            Pubkey.from_string(USER_OBLIGATION): obligation_bytes,
+            usdc_collateral_ata: build_token_account_bytes(
+                mint=Pubkey.from_string(usdc_reserve.collateral_mint),
+                owner=user.raw,
+                amount=2_000_000,
+            ),
         },
     )
 
@@ -915,6 +1006,7 @@ class TestInstructionEncoding:
 
     def test_discriminants_match_solend_program_enum(self):
         assert SolendInstruction.REFRESH_RESERVE == 3
+        assert SolendInstruction.INIT_OBLIGATION == 6
         assert SolendInstruction.REFRESH_OBLIGATION == 7
         assert SolendInstruction.BORROW_OBLIGATION_LIQUIDITY == 10
         assert SolendInstruction.REPAY_OBLIGATION_LIQUIDITY == 11
@@ -924,6 +1016,250 @@ class TestInstructionEncoding:
         assert (
             SolendInstruction.WITHDRAW_OBLIGATION_COLLATERAL_AND_REDEEM_RESERVE_COLLATERAL
             == 15
+        )
+
+
+# === Obligation / collateral account bootstrap ===
+
+
+class TestObligationBootstrapInstructions:
+    """Exact encoding of the account-creation instructions of a first supply."""
+
+    @pytest.fixture(autouse=True)
+    async def initialize_program(self, solend):
+        await solend.program.initialize()
+
+    def test_obligation_seed_is_the_market_address_prefix(self, solend):
+        assert solend.obligation_seed == MAIN_POOL_LENDING_MARKET[:32]
+        assert len(solend.obligation_seed) == OBLIGATION_SEED_LENGTH
+
+    def test_create_account_with_seed_fields(self, solend, user):
+        instruction = solend.build_create_obligation_account_instruction(
+            user, OBLIGATION_RENT_EXEMPTION
+        )
+
+        assert instruction.program_id == SYSTEM_PROGRAM_ID
+        # funder (signer, writable), created account (writable), seed base
+        assert account_metas(instruction) == [
+            (user.raw, True, True),
+            (Pubkey.from_string(USER_OBLIGATION), False, True),
+            (user.raw, True, False),
+        ]
+
+        params = decode_create_account_with_seed(instruction)
+        assert params["from_pubkey"] == user.raw
+        assert params["to_pubkey"] == Pubkey.from_string(USER_OBLIGATION)
+        assert params["base"] == user.raw
+        assert params["seed"] == MAIN_POOL_LENDING_MARKET[:32]
+        assert params["lamports"] == OBLIGATION_RENT_EXEMPTION
+        assert params["space"] == OBLIGATION_ACCOUNT_SIZE == 1300
+        assert params["owner"] == Pubkey.from_string(SOLEND_PROGRAM)
+
+    def test_create_account_with_seed_exact_bytes(self, solend, user):
+        instruction = solend.build_create_obligation_account_instruction(
+            user, OBLIGATION_RENT_EXEMPTION
+        )
+        seed = MAIN_POOL_LENDING_MARKET[:32].encode()
+
+        # SystemInstruction::CreateAccountWithSeed is enum index 3 (u32 LE),
+        # followed by base, the borsh-style u64-prefixed seed, lamports,
+        # space and the owner program.
+        assert bytes(instruction.data) == (
+            struct.pack("<I", 3)
+            + bytes(user.raw)
+            + struct.pack("<Q", len(seed))
+            + seed
+            + struct.pack("<Q", OBLIGATION_RENT_EXEMPTION)
+            + struct.pack("<Q", OBLIGATION_ACCOUNT_SIZE)
+            + bytes(Pubkey.from_string(SOLEND_PROGRAM))
+        )
+
+    def test_created_address_matches_the_derivation(self, solend, user):
+        """The created account lands exactly where every other builder looks."""
+        params = decode_create_account_with_seed(
+            solend.build_create_obligation_account_instruction(user, 1)
+        )
+        assert params["to_pubkey"] == solend.derive_obligation_address(user).raw
+        assert params["to_pubkey"] == Pubkey.create_with_seed(
+            params["base"], params["seed"], params["owner"]
+        )
+
+    def test_init_obligation_instruction(self, solend, user):
+        instruction = solend.build_init_obligation_instruction(user)
+
+        assert instruction.program_id == Pubkey.from_string(SOLEND_PROGRAM)
+        # No arguments: the discriminant byte alone
+        assert bytes(instruction.data) == b"\x06"
+        assert account_metas(instruction) == [
+            (Pubkey.from_string(USER_OBLIGATION), False, True),
+            (Pubkey.from_string(MAIN_POOL_LENDING_MARKET), False, False),
+            (user.raw, True, False),
+            (sysvar.CLOCK, False, False),
+            (sysvar.RENT, False, False),
+            (TOKEN_PROGRAM_ID, False, False),
+        ]
+
+    def test_create_collateral_account_is_idempotent(
+        self, solend, usdc_reserve, user, usdc_collateral_ata
+    ):
+        instruction = solend.build_create_collateral_account_instruction(
+            usdc_reserve, user
+        )
+
+        assert instruction.program_id == ASSOCIATED_TOKEN_PROGRAM_ID
+        # The idempotent variant is discriminant 1; the plain one has no data
+        assert bytes(instruction.data) == b"\x01"
+        assert account_metas(instruction) == [
+            (user.raw, True, True),
+            (usdc_collateral_ata, False, True),
+            (user.raw, False, False),
+            (Pubkey.from_string(usdc_reserve.collateral_mint), False, False),
+            (SYSTEM_PROGRAM_ID, False, False),
+            (TOKEN_PROGRAM_ID, False, False),
+        ]
+        assert instruction == create_idempotent_associated_token_account(
+            payer=user.raw,
+            owner=user.raw,
+            mint=Pubkey.from_string(usdc_reserve.collateral_mint),
+        )
+
+    def test_collateral_account_targets_the_deposit_destination(
+        self, solend, usdc_reserve, user
+    ):
+        """The created ATA is the deposit's destination-collateral account."""
+        creation = solend.build_create_collateral_account_instruction(
+            usdc_reserve, user
+        )
+        deposit = solend.build_deposit_instruction(usdc_reserve, user, 1)
+        assert creation.accounts[1].pubkey == deposit.accounts[1].pubkey
+
+
+class TestSupplyPrerequisites:
+    """The on-chain existence checks that gate the creation instructions."""
+
+    @pytest.fixture(autouse=True)
+    async def initialize_program(self, solend):
+        await solend.program.initialize()
+
+    async def test_fresh_wallet_needs_both_accounts(
+        self, solend, usdc_reserve, user, usdc_collateral_ata, blockhash, monkeypatch
+    ):
+        client = make_rpc_client(blockhash=blockhash, accounts={})
+        monkeypatch.setattr(solend.blockchain, "rpc_client", client)
+
+        instructions = await solend.build_supply_prerequisite_instructions(
+            usdc_reserve, user
+        )
+
+        assert [bytes(i.data) for i in instructions] == [
+            bytes(
+                solend.build_create_obligation_account_instruction(
+                    user, OBLIGATION_RENT_EXEMPTION
+                ).data
+            ),
+            b"\x06",
+            b"\x01",
+        ]
+        # Exactly one probe per account, at the blockchain's commitment
+        assert [call.args[0] for call in client.get_account_info.await_args_list] == [
+            Pubkey.from_string(USER_OBLIGATION),
+            usdc_collateral_ata,
+        ]
+        for call in client.get_account_info.await_args_list:
+            assert call.kwargs == {"commitment": solend.blockchain.commitment}
+        # The rent-exempt minimum is read for the obligation's exact size
+        client.get_minimum_balance_for_rent_exemption.assert_awaited_once_with(
+            OBLIGATION_ACCOUNT_SIZE, commitment=solend.blockchain.commitment
+        )
+
+    async def test_existing_accounts_need_nothing(
+        self, solend, usdc_reserve, user, supply_ready_rpc_client, monkeypatch
+    ):
+        monkeypatch.setattr(solend.blockchain, "rpc_client", supply_ready_rpc_client)
+
+        instructions = await solend.build_supply_prerequisite_instructions(
+            usdc_reserve, user
+        )
+
+        assert instructions == []
+        supply_ready_rpc_client.get_minimum_balance_for_rent_exemption.assert_not_awaited()
+
+    async def test_existing_obligation_missing_collateral_account(
+        self, solend, usdc_reserve, user, obligation_bytes, blockhash, monkeypatch
+    ):
+        """Only the ATA is created when the obligation is already on-chain."""
+        client = make_rpc_client(
+            blockhash=blockhash,
+            accounts={Pubkey.from_string(USER_OBLIGATION): obligation_bytes},
+        )
+        monkeypatch.setattr(solend.blockchain, "rpc_client", client)
+
+        instructions = await solend.build_supply_prerequisite_instructions(
+            usdc_reserve, user
+        )
+
+        assert [bytes(i.data) for i in instructions] == [b"\x01"]
+        client.get_minimum_balance_for_rent_exemption.assert_not_awaited()
+
+    async def test_existing_collateral_account_missing_obligation(
+        self,
+        solend,
+        usdc_reserve,
+        user,
+        usdc_collateral_ata,
+        blockhash,
+        monkeypatch,
+    ):
+        """Only the obligation pair is created when the ATA already exists."""
+        client = make_rpc_client(
+            blockhash=blockhash,
+            accounts={
+                usdc_collateral_ata: build_token_account_bytes(
+                    mint=Pubkey.from_string(usdc_reserve.collateral_mint),
+                    owner=user.raw,
+                )
+            },
+        )
+        monkeypatch.setattr(solend.blockchain, "rpc_client", client)
+
+        instructions = await solend.build_supply_prerequisite_instructions(
+            usdc_reserve, user
+        )
+
+        assert [i.program_id for i in instructions] == [
+            SYSTEM_PROGRAM_ID,
+            Pubkey.from_string(SOLEND_PROGRAM),
+        ]
+        assert bytes(instructions[1].data) == b"\x06"
+
+    async def test_rent_exemption_uses_the_reported_lamports(
+        self, solend, usdc_reserve, user, blockhash, monkeypatch
+    ):
+        """The funded lamports come from the node, not from a constant."""
+        client = make_rpc_client(
+            blockhash=blockhash, accounts={}, rent_exemption=12_345_678
+        )
+        monkeypatch.setattr(solend.blockchain, "rpc_client", client)
+
+        instructions = await solend.build_supply_prerequisite_instructions(
+            usdc_reserve, user
+        )
+
+        params = decode_create_account_with_seed(instructions[0])
+        assert params["lamports"] == 12_345_678
+
+    async def test_account_exists_reflects_the_rpc(
+        self, solend, user, obligation_bytes, blockhash, monkeypatch
+    ):
+        client = make_rpc_client(
+            blockhash=blockhash,
+            accounts={Pubkey.from_string(USER_OBLIGATION): obligation_bytes},
+        )
+        monkeypatch.setattr(solend.blockchain, "rpc_client", client)
+
+        assert await solend.account_exists(SolanaAddress.from_string(USER_OBLIGATION))
+        assert not await solend.account_exists(
+            SolanaAddress.from_raw(Pubkey.new_unique())
         )
 
 
@@ -942,10 +1278,10 @@ class TestBuildTransactions:
         )
 
     async def test_build_supply_transaction(
-        self, solend, usdc_asset, user, blockhash, monkeypatch
+        self, solend, usdc_asset, user, blockhash, supply_ready_rpc_client, monkeypatch
     ):
-        client = make_rpc_client(blockhash=blockhash)
-        monkeypatch.setattr(solend.blockchain, "rpc_client", client)
+        """A wallet whose obligation and collateral ATA exist supplies alone."""
+        monkeypatch.setattr(solend.blockchain, "rpc_client", supply_ready_rpc_client)
 
         transaction = await solend.build_supply_transaction(
             usdc_asset, Decimal("1.5"), USER_ADDRESS
@@ -1123,11 +1459,14 @@ class TestBuildTransactions:
         )
 
     async def test_supply_holds_only_the_deposit_instruction(
-        self, solend, usdc_asset, blockhash, monkeypatch
+        self, solend, usdc_asset, supply_ready_rpc_client, monkeypatch
     ):
-        """Deposit carries its own oracles, so it refreshes the reserve itself."""
-        client = make_rpc_client(blockhash=blockhash)
-        monkeypatch.setattr(solend.blockchain, "rpc_client", client)
+        """Deposit carries its own oracles, so it refreshes the reserve itself.
+
+        With both prerequisite accounts already on-chain, nothing is prepended
+        and no ``RefreshReserve`` is needed either.
+        """
+        monkeypatch.setattr(solend.blockchain, "rpc_client", supply_ready_rpc_client)
 
         transaction = await solend.build_supply_transaction(
             usdc_asset, Decimal("1.5"), USER_ADDRESS
@@ -1136,6 +1475,101 @@ class TestBuildTransactions:
         assert compiled_data(transaction) == [
             bytes([14]) + (1_500_000).to_bytes(8, "little")
         ]
+        # No rent lookup happens when there is no account to create
+        supply_ready_rpc_client.get_minimum_balance_for_rent_exemption.assert_not_awaited()
+
+    async def test_fresh_wallet_supply_prepends_account_creation(
+        self,
+        solend,
+        usdc_asset,
+        usdc_reserve,
+        user,
+        usdc_collateral_ata,
+        blockhash,
+        monkeypatch,
+    ):
+        """A first-time wallet gets obligation + ATA creation in one transaction."""
+        client = make_rpc_client(blockhash=blockhash, accounts={})
+        monkeypatch.setattr(solend.blockchain, "rpc_client", client)
+
+        transaction = await solend.build_supply_transaction(
+            usdc_asset, Decimal("1.5"), USER_ADDRESS
+        )
+
+        data = compiled_data(transaction)
+        assert len(data) == 4
+        # CreateAccountWithSeed, InitObligation, idempotent ATA, deposit
+        assert struct.unpack("<I", data[0][:4])[0] == 3
+        assert data[1] == b"\x06"
+        assert data[2] == b"\x01"
+        assert data[3] == bytes([14]) + (1_500_000).to_bytes(8, "little")
+
+        assert compiled_program_ids(transaction) == [
+            SYSTEM_PROGRAM_ID,
+            Pubkey.from_string(SOLEND_PROGRAM),
+            ASSOCIATED_TOKEN_PROGRAM_ID,
+            Pubkey.from_string(SOLEND_PROGRAM),
+        ]
+
+        # The created obligation and ATA are the very accounts the deposit uses
+        assert compiled_accounts(transaction, 0)[1] == Pubkey.from_string(
+            USER_OBLIGATION
+        )
+        assert compiled_accounts(transaction, 1) == [
+            Pubkey.from_string(USER_OBLIGATION),
+            Pubkey.from_string(MAIN_POOL_LENDING_MARKET),
+            user.raw,
+            sysvar.CLOCK,
+            sysvar.RENT,
+            TOKEN_PROGRAM_ID,
+        ]
+        assert compiled_accounts(transaction, 2)[1] == usdc_collateral_ata
+        deposit_accounts = compiled_accounts(transaction, 3)
+        assert deposit_accounts[1] == usdc_collateral_ata
+        assert deposit_accounts[8] == Pubkey.from_string(USER_OBLIGATION)
+
+        # The obligation is funded with the rent-exempt minimum the node reports
+        assert data[0] == bytes(
+            solend.build_create_obligation_account_instruction(
+                user, OBLIGATION_RENT_EXEMPTION
+            ).data
+        )
+        client.get_minimum_balance_for_rent_exemption.assert_awaited_once_with(
+            OBLIGATION_ACCOUNT_SIZE, commitment=solend.blockchain.commitment
+        )
+        # The ATA created is the one derived for the reserve's collateral mint
+        assert usdc_collateral_ata == ata(user, usdc_reserve.collateral_mint)
+
+    async def test_supply_with_existing_accounts_adds_nothing(
+        self, solend, usdc_asset, supply_ready_rpc_client, monkeypatch
+    ):
+        """Both accounts on-chain: the transaction is the deposit alone."""
+        monkeypatch.setattr(solend.blockchain, "rpc_client", supply_ready_rpc_client)
+
+        transaction = await solend.build_supply_transaction(
+            usdc_asset, Decimal("2"), USER_ADDRESS
+        )
+
+        assert compiled_data(transaction) == [
+            bytes([14]) + (2_000_000).to_bytes(8, "little")
+        ]
+
+    async def test_withdraw_and_borrow_never_create_the_obligation(
+        self, solend, usdc_asset, sol_asset, blockhash, monkeypatch
+    ):
+        """Only supply bootstraps: the other flows still require an obligation."""
+        client = make_rpc_client(blockhash=blockhash, accounts={})
+        monkeypatch.setattr(solend.blockchain, "rpc_client", client)
+
+        with pytest.raises(ValueError, match="No Solend obligation account"):
+            await solend.build_withdraw_transaction(
+                usdc_asset, Decimal("1"), USER_ADDRESS
+            )
+        with pytest.raises(ValueError, match="No Solend obligation account"):
+            await solend.build_borrow_transaction(
+                sol_asset, Decimal("1"), InterestRateMode.VARIABLE, USER_ADDRESS
+            )
+        client.get_minimum_balance_for_rent_exemption.assert_not_awaited()
 
     async def test_withdraw_instruction_sequence(
         self,
@@ -1560,10 +1994,11 @@ class TestFacadeDispatch:
         assert solend.lending_market.string == MAIN_POOL_LENDING_MARKET
 
     async def test_supply_dispatches_to_solend(
-        self, money_market, usdc_asset, blockhash, monkeypatch
+        self, money_market, usdc_asset, supply_ready_rpc_client, monkeypatch
     ):
-        client = make_rpc_client(blockhash=blockhash)
-        monkeypatch.setattr(money_market.blockchain, "rpc_client", client)
+        monkeypatch.setattr(
+            money_market.blockchain, "rpc_client", supply_ready_rpc_client
+        )
 
         transaction = await money_market.supply(
             usdc_asset, Decimal("1.5"), USER_ADDRESS
@@ -1813,3 +2248,57 @@ class TestSolendIDLDocument:
         assert len(instructions["withdraw"]["accounts"]) == 12
         assert len(instructions["borrow"]["accounts"]) == 9
         assert len(instructions["repay"]["accounts"]) == 7
+
+        # The registry keys stay frozen: instructions built directly against
+        # the program id are documented in a sibling section instead.
+        assert "init_obligation" not in instructions
+
+    async def test_idl_documents_the_directly_built_instructions(self):
+        idl = await SolanaLocalFileIDL(file_name="solend.json").get_idl()
+        direct = idl["directInstructions"]
+
+        assert direct["init_obligation"]["discriminant"] == int(
+            SolendInstruction.INIT_OBLIGATION
+        )
+        assert direct["refresh_reserve"]["discriminant"] == int(
+            SolendInstruction.REFRESH_RESERVE
+        )
+        assert direct["refresh_obligation"]["discriminant"] == int(
+            SolendInstruction.REFRESH_OBLIGATION
+        )
+
+    async def test_idl_init_obligation_accounts_match_the_builder(self, solend, user):
+        """The documented InitObligation layout is the one actually built."""
+        idl = await SolanaLocalFileIDL(file_name="solend.json").get_idl()
+        documented = idl["directInstructions"]["init_obligation"]["accounts"]
+
+        instruction = solend.build_init_obligation_instruction(user)
+
+        assert [a["name"] for a in documented] == [
+            "obligation",
+            "lendingMarket",
+            "obligationOwner",
+            "clockSysvar",
+            "rentSysvar",
+            "tokenProgram",
+        ]
+        assert [(a["isSigner"], a["isMut"]) for a in documented] == [
+            (meta.is_signer, meta.is_writable) for meta in instruction.accounts
+        ]
+
+    async def test_idl_refresh_reserve_accounts_match_the_builder(
+        self, solend, usdc_reserve
+    ):
+        idl = await SolanaLocalFileIDL(file_name="solend.json").get_idl()
+        documented = idl["directInstructions"]["refresh_reserve"]["accounts"]
+
+        instruction = solend.build_refresh_reserve_instruction(usdc_reserve)
+
+        assert [a["name"] for a in documented] == [
+            "reserve",
+            "pythOracle",
+            "switchboardOracle",
+        ]
+        assert [(a["isSigner"], a["isMut"]) for a in documented] == [
+            (meta.is_signer, meta.is_writable) for meta in instruction.accounts
+        ]

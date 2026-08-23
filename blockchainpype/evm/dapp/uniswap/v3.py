@@ -17,6 +17,7 @@ internal route-keyed map consulted at build time.
 """
 
 import uuid
+from collections import OrderedDict
 from collections.abc import Sequence
 from decimal import Decimal
 from typing import Any, cast
@@ -58,6 +59,7 @@ class UniswapV3(ProtocolImplementation):
 
     PROTOCOL_NAME = "uniswap_v3"
     DEFAULT_FEE_TIERS: tuple[int, ...] = (100, 500, 3000, 10000)
+    ROUTE_FEE_TIER_CACHE_SIZE = 1024
     DEFAULT_MAX_SLIPPAGE = Decimal("0.005")
     DEFAULT_DEADLINE_MINUTES = 20
 
@@ -92,7 +94,10 @@ class UniswapV3(ProtocolImplementation):
         self.quoter_address = quoter_address
         self._wallet = wallet
         self._pool_contracts: dict[str, BlockchainBoundContract] = {}
-        self._route_fee_tiers: dict[str, tuple[int, ...]] = {}
+        # Bounded LRU: every find_best_route call composes candidate routes
+        # with amount-dependent keys, so an unbounded dict would grow for the
+        # lifetime of a long-running process.
+        self._route_fee_tiers: OrderedDict[str, tuple[int, ...]] = OrderedDict()
 
         tiers = tuple(fee_tiers) if fee_tiers else self.DEFAULT_FEE_TIERS
         for tier in tiers:
@@ -259,6 +264,8 @@ class UniswapV3(ProtocolImplementation):
         if len(route.sequence) == 1:
             return (self.fee_tier_from_fraction(route.taxes),)
         tiers = self._route_fee_tiers.get(self._route_key(route))
+        if tiers is not None:
+            self._route_fee_tiers.move_to_end(self._route_key(route))
         if tiers is None:
             raise ValueError(
                 "Cannot determine per-hop fee tiers for this multi-hop route: "
@@ -463,6 +470,9 @@ class UniswapV3(ProtocolImplementation):
             protocol=self.PROTOCOL_NAME,
         )
         self._route_fee_tiers[self._route_key(route)] = tuple(tiers)
+        self._route_fee_tiers.move_to_end(self._route_key(route))
+        while len(self._route_fee_tiers) > self.ROUTE_FEE_TIER_CACHE_SIZE:
+            self._route_fee_tiers.popitem(last=False)
         return route
 
     # === Reserves ===

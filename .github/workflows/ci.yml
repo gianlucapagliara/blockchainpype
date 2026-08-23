@@ -75,4 +75,4 @@ jobs:
       working-directory: common/hardhat
       run: npm ci
     - name: Run Hardhat integration tests
-      run: uv run pytest tests/evm/test_hardhat.py -m "" --timeout=300
+      run: uv run pytest tests/evm/test_hardhat.py tests/evm/test_uniswap_hardhat_integration.py -m "" --timeout=300

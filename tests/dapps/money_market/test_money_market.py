@@ -710,3 +710,33 @@ class TestMoneyMarketMultiProtocol:
             "Aave V3",
             "Compound V3",
         }
+
+
+class TestWithdrawSignatureCompatibility:
+    """Regression: ``protocol`` stays the 4th positional parameter.
+
+    ``withdraw_all`` was added keyword-only so pre-existing positional
+    ``withdraw(asset, amount, address, "protocol")`` callers keep their
+    meaning instead of silently withdrawing the entire position.
+    """
+
+    async def test_protocol_passed_positionally(
+        self, money_market, stub_strategy, usdc_asset
+    ):
+        await money_market.withdraw(
+            usdc_asset, Decimal("500"), USER_ADDRESS, "Test Protocol"
+        )
+
+        assert stub_strategy.calls[-1] == (
+            "build_withdraw_transaction",
+            usdc_asset,
+            Decimal("500"),
+            USER_ADDRESS,
+            False,
+        )
+
+    async def test_withdraw_all_is_keyword_only(self, money_market, usdc_asset):
+        with pytest.raises(TypeError):
+            await money_market.withdraw(
+                usdc_asset, Decimal("500"), USER_ADDRESS, "Test Protocol", True
+            )

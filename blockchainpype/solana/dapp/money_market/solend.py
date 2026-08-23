@@ -13,6 +13,11 @@ index) followed by little-endian fields. This module implements:
   requires in the same transaction as withdraw/borrow/repay (see
   :meth:`Solend.build_refresh_reserve_instruction` and
   :meth:`Solend.build_refresh_obligation_instruction`)
+- The one-time account creation a first-time supplier needs: the
+  ``SystemProgram::CreateAccountWithSeed`` + ``InitObligation`` pair that
+  brings the derived obligation account into existence, and the idempotent
+  associated-token-account creation of the user's collateral (cToken)
+  account (see :meth:`Solend.build_supply_prerequisite_instructions`)
 - Binary parsers for the on-chain ``Reserve`` and ``Obligation`` account
   layouts (documented field offsets below)
 - Market data, account data, and position reads derived from those accounts
@@ -40,11 +45,14 @@ from financepype.assets.blockchain import BlockchainAsset
 from financepype.owners.wallet import BlockchainWallet
 from financepype.platforms.platform import Platform
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from solders import sysvar
 from solders.instruction import AccountMeta, Instruction
 from solders.message import Message
 from solders.pubkey import Pubkey
+from solders.system_program import CreateAccountWithSeedParams, create_account_with_seed
 from solders.transaction import Transaction
 from spl.token.constants import TOKEN_PROGRAM_ID
+from spl.token.instructions import create_idempotent_associated_token_account
 
 from blockchainpype.dapps.money_market import (
     BorrowingPosition,
@@ -104,6 +112,7 @@ class SolendInstruction(IntEnum):
     """
 
     REFRESH_RESERVE = 3
+    INIT_OBLIGATION = 6
     REFRESH_OBLIGATION = 7
     BORROW_OBLIGATION_LIQUIDITY = 10
     REPAY_OBLIGATION_LIQUIDITY = 11
@@ -673,6 +682,14 @@ class Solend:
       supplied liquidity is always deposited as obligation collateral; the
       ``enable_as_collateral`` flag is therefore ignored (Solend has no
       collateral toggle) and ``build_collateral_transaction`` is unsupported.
+    - Account creation: the obligation account and the user's collateral
+      (cToken) associated token account are the caller's responsibility on
+      Solend, so :meth:`build_supply_transaction` checks both on-chain and
+      prepends the missing creations (see
+      :meth:`build_supply_prerequisite_instructions`). The withdraw/borrow
+      paths deliberately do not create anything: they read the obligation's
+      state to build their refresh prefix and therefore require an existing,
+      already-funded obligation.
     - Solend only has variable-rate borrows; ``interest_rate_mode`` is
       accepted for contract compatibility and ignored.
     - Staleness: the program rejects an instruction touching a reserve (or an
@@ -794,6 +811,19 @@ class Solend:
         authority_address: SolanaAddress = SolanaAddress.from_raw(authority)
         return authority_address
 
+    @property
+    def obligation_seed(self) -> str:
+        """The deterministic seed of this market's obligation accounts.
+
+        The solend-sdk convention is the first
+        :data:`OBLIGATION_SEED_LENGTH` characters of the lending market's
+        base58 address. The same string is used both to derive the obligation
+        address (:meth:`derive_obligation_address`) and to create the account
+        on-chain (:meth:`build_create_obligation_account_instruction`), so the
+        two can never drift apart.
+        """
+        return self._lending_market.string[:OBLIGATION_SEED_LENGTH]
+
     def derive_obligation_address(self, owner: SolanaAddress) -> SolanaAddress:
         """Derive a user's obligation account address for this lending market.
 
@@ -806,8 +836,9 @@ class Solend:
         Returns:
             SolanaAddress: The derived obligation account address
         """
-        seed = self._lending_market.string[:OBLIGATION_SEED_LENGTH]
-        obligation = Pubkey.create_with_seed(owner.raw, seed, self.program.address.raw)
+        obligation = Pubkey.create_with_seed(
+            owner.raw, self.obligation_seed, self.program.address.raw
+        )
         obligation_address: SolanaAddress = SolanaAddress.from_raw(obligation)
         return obligation_address
 
@@ -905,6 +936,40 @@ class Solend:
         if account is None:
             return None
         return bytes(account.data)
+
+    async def account_exists(self, address: SolanaAddress) -> bool:
+        """Check whether an account exists on-chain.
+
+        Uses the same ``getAccountInfo`` read (at the blockchain's commitment)
+        the state readers use: the RPC reports a nonexistent account with a
+        null value, which :meth:`_fetch_account_data` maps to ``None``.
+
+        Args:
+            address (SolanaAddress): The account to probe
+
+        Returns:
+            bool: True when the account exists at the current commitment
+        """
+        return await self._fetch_account_data(address) is not None
+
+    async def fetch_obligation_rent_exemption(self) -> int:
+        """Fetch the rent-exempt minimum balance of an obligation account.
+
+        The obligation is a fixed-size (:data:`OBLIGATION_ACCOUNT_SIZE`)
+        account, so the lamports it must be funded with are whatever the
+        cluster currently charges for that data length. The value is read from
+        the node instead of being hard-coded because the rent rate is a
+        cluster parameter.
+
+        Returns:
+            int: The rent-exempt minimum in lamports
+        """
+        response = (
+            await self._blockchain.rpc_client.get_minimum_balance_for_rent_exemption(
+                OBLIGATION_ACCOUNT_SIZE, commitment=self._blockchain.commitment
+            )
+        )
+        return int(response.value)
 
     async def get_reserve_state(
         self, reserve: SolendReserveConfiguration
@@ -1143,10 +1208,12 @@ class Solend:
         """Build a raw instruction for the Solend program.
 
         The simplified IDL in ``common/idl/solend.json`` is only a name
-        registry for the four core obligation instructions, so the refresh
-        instructions - which carry no arguments beyond their discriminant -
-        are constructed directly against the program id instead of going
-        through :meth:`SolanaProgram.create_instruction`.
+        registry for the four core obligation instructions, so the refresh and
+        ``InitObligation`` instructions - which carry no arguments beyond
+        their discriminant - are constructed directly against the program id
+        instead of going through :meth:`SolanaProgram.create_instruction`.
+        Their account layouts are documented in the IDL's
+        ``directInstructions`` section.
         """
         return Instruction(
             program_id=self.program.address.raw, accounts=accounts, data=data
@@ -1208,6 +1275,113 @@ class Solend:
         )
         return self._program_instruction(
             accounts, bytes([SolendInstruction.REFRESH_OBLIGATION])
+        )
+
+    def build_create_obligation_account_instruction(
+        self, user: SolanaAddress, lamports: int
+    ) -> Instruction:
+        """Build the ``SystemProgram::CreateAccountWithSeed`` for the obligation.
+
+        The obligation account is not a PDA: it is a plain system-created
+        account at the deterministic address
+        ``create_with_seed(user, obligation_seed, solend_program)``, so it is
+        the client that has to allocate and fund it before the program can
+        initialize it. The parameters mirror
+        :meth:`derive_obligation_address` exactly - same base (the user's
+        wallet), same seed (:attr:`obligation_seed`), same owner program - so
+        the created account lands on the address every other instruction of
+        this module derives.
+
+        Args:
+            user (SolanaAddress): The obligation owner; pays for and bases the
+                seeded address (it must sign the transaction)
+            lamports (int): Lamports to fund the account with; must be at
+                least the rent-exempt minimum for
+                :data:`OBLIGATION_ACCOUNT_SIZE` bytes (see
+                :meth:`fetch_obligation_rent_exemption`)
+
+        Returns:
+            Instruction: The system-program instruction creating the account
+                with ``space = OBLIGATION_ACCOUNT_SIZE`` owned by the Solend
+                program
+        """
+        return create_account_with_seed(
+            CreateAccountWithSeedParams(
+                from_pubkey=user.raw,
+                to_pubkey=self.derive_obligation_address(user).raw,
+                base=user.raw,
+                seed=self.obligation_seed,
+                lamports=lamports,
+                space=OBLIGATION_ACCOUNT_SIZE,
+                owner=self.program.address.raw,
+            )
+        )
+
+    def build_init_obligation_instruction(self, user: SolanaAddress) -> Instruction:
+        """Build ``InitObligation`` (index 6) for a user's obligation.
+
+        Writes the empty ``Obligation`` state struct into the freshly created
+        (still zeroed) account, binding it to this lending market and owner.
+        It must run after
+        :meth:`build_create_obligation_account_instruction` and before any
+        instruction that unpacks the obligation.
+
+        Like the refresh instructions it carries no arguments beyond its
+        discriminant and is built directly against the program id; its account
+        layout is documented under ``directInstructions`` in
+        ``common/idl/solend.json``.
+
+        Data: ``[6]`` (no arguments). Account layout::
+
+            0 [w] obligation (created, uninitialized)
+            1 [ ] lending market
+            2 [s] obligation owner (user)
+            3 [ ] clock sysvar
+            4 [ ] rent sysvar
+            5 [ ] SPL token program
+
+        Args:
+            user (SolanaAddress): The obligation owner (must sign)
+
+        Returns:
+            Instruction: The ``InitObligation`` instruction
+        """
+        accounts = [
+            AccountMeta(self.derive_obligation_address(user).raw, False, True),
+            AccountMeta(self._lending_market.raw, False, False),
+            AccountMeta(user.raw, True, False),
+            AccountMeta(sysvar.CLOCK, False, False),
+            AccountMeta(sysvar.RENT, False, False),
+            AccountMeta(TOKEN_PROGRAM_ID, False, False),
+        ]
+        return self._program_instruction(
+            accounts, bytes([SolendInstruction.INIT_OBLIGATION])
+        )
+
+    def build_create_collateral_account_instruction(
+        self, reserve: SolendReserveConfiguration, user: SolanaAddress
+    ) -> Instruction:
+        """Build the idempotent ATA creation for a reserve's collateral token.
+
+        The deposit instruction credits the reserve's collateral (cToken) mint
+        to the user's associated token account, which does not exist for a
+        first-time supplier. The *idempotent* associated-token-account
+        instruction (data ``[1]``) is used rather than the plain one (data
+        ``[]``) so that the transaction still succeeds when the account was
+        created between this module's existence check and execution.
+
+        Args:
+            reserve (SolendReserveConfiguration): The reserve whose collateral
+                mint the account is for
+            user (SolanaAddress): The account owner; also the fee payer of the
+                account rent (it must sign the transaction)
+
+        Returns:
+            Instruction: The associated-token-program instruction
+        """
+        collateral_mint = SolanaAddress.from_string(reserve.collateral_mint)
+        return create_idempotent_associated_token_account(
+            payer=user.raw, owner=user.raw, mint=collateral_mint.raw
         )
 
     def build_deposit_instruction(
@@ -1550,6 +1724,64 @@ class Solend:
             raise ValueError(f"Amount must be positive, got {amount}")
         return raw_amount
 
+    async def build_supply_prerequisite_instructions(
+        self, reserve: SolendReserveConfiguration, user: SolanaAddress
+    ) -> list[Instruction]:
+        """Build the account creations a supply needs, based on chain state.
+
+        ``DepositReserveLiquidityAndObligationCollateral`` unpacks the user's
+        obligation account and credits the reserve's cTokens to the user's
+        collateral associated token account. Neither exists for a wallet that
+        has never supplied to this lending market, and the program creates
+        neither, so a first-time deposit alone always fails on-chain. This
+        method probes both accounts (two ``getAccountInfo`` reads at the
+        blockchain's commitment) and returns only the creations that are
+        actually missing, in the order they must run:
+
+        1. ``SystemProgram::CreateAccountWithSeed`` allocating and funding the
+           derived obligation account (skipped when the obligation exists)
+        2. ``InitObligation`` writing its initial state (same condition)
+        3. the idempotent creation of the user's collateral ATA (skipped when
+           that account exists)
+
+        The user's *liquidity* ATA is deliberately not created: it is the
+        deposit's source account and must already hold the supplied amount.
+
+        Mere existence is the right predicate for both probes: the creation
+        instructions fail on an account that already exists ("account already
+        in use"), and Solana transactions are atomic, so an obligation account
+        can never be left created-but-uninitialized by this builder. The ATA
+        creation is additionally emitted in its idempotent form, so it also
+        tolerates the account appearing between the probe and execution.
+
+        Args:
+            reserve (SolendReserveConfiguration): The reserve being supplied to
+            user (SolanaAddress): The supplying user
+
+        Returns:
+            list[Instruction]: The creation instructions to prepend to the
+                deposit; empty when both accounts already exist
+        """
+        instructions: list[Instruction] = []
+
+        obligation_address = self.derive_obligation_address(user)
+        if not await self.account_exists(obligation_address):
+            lamports = await self.fetch_obligation_rent_exemption()
+            instructions.append(
+                self.build_create_obligation_account_instruction(user, lamports)
+            )
+            instructions.append(self.build_init_obligation_instruction(user))
+
+        collateral_account = self.derive_associated_token_account(
+            user, SolanaAddress.from_string(reserve.collateral_mint)
+        )
+        if not await self.account_exists(collateral_account):
+            instructions.append(
+                self.build_create_collateral_account_instruction(reserve, user)
+            )
+
+        return instructions
+
     async def build_supply_transaction(
         self,
         asset: BlockchainAsset,
@@ -1565,9 +1797,14 @@ class Solend:
         liquidity is always deposited as obligation collateral;
         ``enable_as_collateral`` is ignored (Solend has no collateral toggle).
 
-        The transaction holds this single instruction: the deposit takes the
-        reserve's Pyth and Switchboard oracle accounts and refreshes the
-        reserve itself, so no separate ``RefreshReserve`` is needed.
+        The deposit needs no ``RefreshReserve``: it takes the reserve's Pyth
+        and Switchboard oracle accounts and refreshes the reserve itself. It
+        does, however, need the user's obligation account and collateral
+        (cToken) associated token account to exist. Both are checked on-chain
+        and the missing ones are created by instructions prepended to the same
+        transaction (see :meth:`build_supply_prerequisite_instructions`), so a
+        fresh wallet can supply in one transaction; a wallet that already has
+        both gets the single deposit instruction as before.
 
         Args:
             asset: The asset to supply (mint must have a configured reserve)
@@ -1585,9 +1822,10 @@ class Solend:
         raw_amount = self._raw_amount(asset, amount)
         user = SolanaAddress.from_string(user_address)
 
-        instruction = self.build_deposit_instruction(reserve, user, raw_amount)
+        instructions = await self.build_supply_prerequisite_instructions(reserve, user)
+        instructions.append(self.build_deposit_instruction(reserve, user, raw_amount))
         return await self._wrap_instructions(
-            [instruction],
+            instructions,
             user,
             client_operation_id or self._operation_id("supply", reserve.liquidity_mint),
         )

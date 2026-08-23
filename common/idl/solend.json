@@ -19,6 +19,11 @@
         "reserveCollateralSupply(w), obligation(w), obligationOwner(s),",
         "pythOracle, switchboardOracle, userTransferAuthority(s), tokenProgram;",
         "the entry itself is kept minimal for backward compatibility.",
+        "Instructions the strategy builds directly against the program id,",
+        "without going through the 'instructions' name registry, are",
+        "documented under 'directInstructions' below (InitObligation and the",
+        "two refresh instructions); the registry keys are frozen for backward",
+        "compatibility.",
         "'enable_collateral' and 'disable_collateral' are NOT Solend",
         "instructions (deposited liquidity is always active obligation",
         "collateral); they are kept only as unsupported placeholders for",
@@ -131,6 +136,71 @@
                 {"name": "lendingMarketAuthority", "isMut": false, "isSigner": false},
                 {"name": "userTransferAuthority", "isMut": false, "isSigner": true},
                 {"name": "tokenProgram", "isMut": false, "isSigner": false}
+            ]
+        }
+    },
+    "directInstructions": {
+        "docs": [
+            "Instructions the Solend strategy encodes and submits directly",
+            "against the program id instead of through the 'instructions' name",
+            "registry above (they carry no arguments beyond their",
+            "discriminant). They are documented here so the account layouts",
+            "live next to the ones of the registry instructions; the loader",
+            "(SolanaProgram / find_idl_instruction) only reads 'instructions'."
+        ],
+        "init_obligation": {
+            "name": "init_obligation",
+            "docs": [
+                "InitObligation. Initializes the obligation state in the",
+                "account created by the SystemProgram CreateAccountWithSeed",
+                "that immediately precedes it (base = obligation owner, seed =",
+                "the first 32 characters of the lending market's base58",
+                "address, space = 1300, lamports = the rent-exempt minimum,",
+                "owner = this program); that creation is a system-program",
+                "instruction and therefore not described here.",
+                "Required once per (owner, lending market) before the first",
+                "deposit: every other obligation instruction unpacks this",
+                "account and fails when it does not exist."
+            ],
+            "discriminant": 6,
+            "args": [],
+            "accounts": [
+                {"name": "obligation", "isMut": true, "isSigner": false},
+                {"name": "lendingMarket", "isMut": false, "isSigner": false},
+                {"name": "obligationOwner", "isMut": false, "isSigner": true},
+                {"name": "clockSysvar", "isMut": false, "isSigner": false},
+                {"name": "rentSysvar", "isMut": false, "isSigner": false},
+                {"name": "tokenProgram", "isMut": false, "isSigner": false}
+            ]
+        },
+        "refresh_reserve": {
+            "name": "refresh_reserve",
+            "docs": [
+                "RefreshReserve. Accrues a reserve's interest and re-reads its",
+                "oracle prices; required in the same transaction as any",
+                "instruction touching the reserve."
+            ],
+            "discriminant": 3,
+            "args": [],
+            "accounts": [
+                {"name": "reserve", "isMut": true, "isSigner": false},
+                {"name": "pythOracle", "isMut": false, "isSigner": false},
+                {"name": "switchboardOracle", "isMut": false, "isSigner": false}
+            ]
+        },
+        "refresh_obligation": {
+            "name": "refresh_obligation",
+            "docs": [
+                "RefreshObligation. Recomputes the obligation's collateral and",
+                "borrow values from its (already refreshed) reserves.",
+                "The account list is variadic: the obligation is followed by",
+                "every deposit reserve and then every borrow reserve, in the",
+                "exact order they are stored in the obligation account."
+            ],
+            "discriminant": 7,
+            "args": [],
+            "accounts": [
+                {"name": "obligation", "isMut": true, "isSigner": false}
             ]
         }
     }

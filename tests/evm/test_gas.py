@@ -370,3 +370,29 @@ class TestMaxGasClamp:
         )
 
         assert result["gas"] == 100_000
+
+
+class TestGasPriceCappedFromConfiguration:
+    """Regression: wrapping an already-capped configuration must not crash."""
+
+    def test_wrapping_plain_configuration(self) -> None:
+        from blockchainpype.evm.dapp.gas import GasPriceCappedConfiguration
+
+        base = GasConfiguration(max_gas=123_456)
+        capped = GasPriceCappedConfiguration.from_configuration(base, 30)
+
+        assert capped.max_gas_price_gwei == 30
+        assert capped.max_gas == 123_456
+
+    def test_wrapping_already_capped_takes_stricter_cap(self) -> None:
+        from blockchainpype.evm.dapp.gas import GasPriceCappedConfiguration
+
+        base = GasPriceCappedConfiguration(max_gas_price_gwei=20)
+        assert (
+            GasPriceCappedConfiguration.from_configuration(base, 30).max_gas_price_gwei
+            == 20
+        )
+        assert (
+            GasPriceCappedConfiguration.from_configuration(base, 10).max_gas_price_gwei
+            == 10
+        )

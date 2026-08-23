@@ -89,13 +89,19 @@ class GasPriceCappedConfiguration(GasConfiguration):
 
         Args:
             configuration: The estimation settings to reuse (typically the
-                wallet's own gas configuration)
+                wallet's own gas configuration). May itself be capped: its
+                own ``max_gas_price_gwei`` is replaced, and the stricter of
+                the two caps wins.
             max_gas_price_gwei: Maximum price per gas unit, in gwei
 
         Returns:
             GasPriceCappedConfiguration: The capped configuration
         """
-        return cls(**configuration.model_dump(), max_gas_price_gwei=max_gas_price_gwei)
+        settings = configuration.model_dump()
+        existing_cap = settings.pop("max_gas_price_gwei", None)
+        if existing_cap is not None:
+            max_gas_price_gwei = min(max_gas_price_gwei, existing_cap)
+        return cls(**settings, max_gas_price_gwei=max_gas_price_gwei)
 
     async def get_gas(
         self,

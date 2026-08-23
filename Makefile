@@ -49,7 +49,7 @@ test: ## Run test suite (default selection: skips network/integration tests)
 
 .PHONY: test-integration
 test-integration: ## Run Hardhat integration tests (needs npm install in common/hardhat)
-	$(UV) run pytest tests/evm/test_hardhat.py -m "" --timeout=300
+	$(UV) run pytest tests/evm/test_hardhat.py tests/evm/test_uniswap_hardhat_integration.py -m "" --timeout=300
 
 .PHONY: check
 check: lint format-check type-check test ## Run all quality checks

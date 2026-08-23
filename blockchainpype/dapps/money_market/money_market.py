@@ -309,8 +309,9 @@ class MoneyMarket(DecentralizedApplication, ABC):
         asset: BlockchainAsset,
         amount: Decimal,
         user_address: str,
-        withdraw_all: bool = False,
         protocol: str | None = None,
+        *,
+        withdraw_all: bool = False,
     ) -> BlockchainTransaction:
         """Withdraw assets from the money market.
 
@@ -318,12 +319,13 @@ class MoneyMarket(DecentralizedApplication, ABC):
             asset: The asset to withdraw
             amount: The amount to withdraw (ignored when ``withdraw_all``)
             user_address: The user's wallet address
-            withdraw_all: Whether to withdraw the full supplied position
             protocol: Specific protocol to use, if None uses first available
+            withdraw_all: Whether to withdraw the full supplied position.
+                Keyword-only so positional ``protocol`` callers keep working.
         """
         protocol_impl = self._get_protocol_implementation(protocol)
         return await protocol_impl.build_withdraw_transaction(
-            asset, amount, user_address, withdraw_all
+            asset, amount, user_address, withdraw_all=withdraw_all
         )
 
     async def borrow(
